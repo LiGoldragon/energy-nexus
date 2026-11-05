@@ -1,6 +1,7 @@
-use meta_signal_energy_nexus::Set;
+use meta_signal_energy_nexus::{Set, Target_Data};
 use signal_energy_nexus::{
-    Level, Minutes, Percent, Provider, Reading, Reminder, Reset, ResetStatus, Threshold,
+    Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus, Standing,
+    Target, Threshold,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub struct Configuration {
     pub reminders: Vec<Reminder>,
     pub redeem_expiring: Minutes,
     pub redeem_used_at_least: Percent,
+    pub targets: Vec<Target_Data>,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -38,6 +40,16 @@ impl Default for Configuration {
             reminders: Vec::new(),
             redeem_expiring: Minutes(1440),
             redeem_used_at_least: Percent(1),
+            targets: vec![
+                Target_Data {
+                    provider: Provider::Claude,
+                    target: Target::Even,
+                },
+                Target_Data {
+                    provider: Provider::Codex,
+                    target: Target::Even,
+                },
+            ],
         }
     }
 }
@@ -57,6 +69,61 @@ pub enum RedeemDecision {
     Allowed(Reset),
     Refused(String),
     NoReset,
+}
+
+pub trait Pacing {
+    fn pace(&self, configuration: &Configuration) -> Pace;
+}
+impl Pacing for Reading {
+    fn pace(&self, configuration: &Configuration) -> Pace {
+        let target = configuration
+            .targets
+            .iter()
+            .find(|configured| configured.provider == self.provider)
+            .map(|configured| configured.target.clone())
+            .unwrap_or(Target::Even);
+        let window = self
+            .window_vector
+            .iter()
+            .find(|window| window.name == signal_energy_nexus::Name::Week)
+            .or_else(|| {
+                self.window_vector
+                    .iter()
+                    .max_by_key(|window| window.duration.0)
+            });
+        let used = window
+            .map(|window| window.used.0)
+            .unwrap_or(0)
+            .clamp(0, 100);
+        let (start, natural_end) = window
+            .map(|window| (window.resets.0 - window.duration.0 * 60, window.resets.0))
+            .unwrap_or((self.at.0, self.at.0));
+        let deadline = match &target {
+            Target::Even => natural_end,
+            Target::SpendBy(instant) => instant.0,
+        };
+        let span = (deadline - start).max(1);
+        let elapsed = (self.at.0 - start).clamp(0, span);
+        let expected = ((elapsed * 100 + span / 2) / span).clamp(0, 100);
+        let seconds_left = (deadline - self.at.0).max(1);
+        let per_day = if used >= 100 || deadline <= self.at.0 {
+            0
+        } else {
+            (((100 - used) * 86_400 + seconds_left / 2) / seconds_left).max(1)
+        };
+        Pace {
+            provider: self.provider.clone(),
+            target,
+            expected: Percent(expected),
+            used: Percent(used),
+            standing: match used.cmp(&expected) {
+                std::cmp::Ordering::Greater => Standing::Over,
+                std::cmp::Ordering::Less => Standing::Under,
+                std::cmp::Ordering::Equal => Standing::On,
+            },
+            per_day: Percent(per_day),
+        }
+    }
 }
 
 pub trait Levelling {
@@ -155,6 +222,12 @@ impl Configuring for Memory {
             }
             Set::RedeemExpiring(value) => self.configuration.redeem_expiring = value,
             Set::RedeemUsedAtLeast(value) => self.configuration.redeem_used_at_least = value,
+            Set::Target(value) => {
+                self.configuration
+                    .targets
+                    .retain(|known| known.provider != value.provider);
+                self.configuration.targets.push(value)
+            }
         }
         Ok(set)
     }
@@ -260,5 +333,21 @@ mod tests {
             m.redeem_decision(&Provider::Codex, 100),
             RedeemDecision::Allowed(_)
         ))
+    }
+    #[test]
+    fn pace_compares_week_usage_to_spend_by_target() {
+        let mut value = reading(true, 92);
+        value.at = Instant(50);
+        value.window_vector[0].resets = Instant(150);
+        value.window_vector[0].duration = Minutes(2);
+        let mut configuration = Configuration::default();
+        configuration.targets = vec![Target_Data {
+            provider: Provider::Codex,
+            target: Target::SpendBy(Instant(170)),
+        }];
+        let pace = value.pace(&configuration);
+        assert_eq!(pace.used, Percent(92));
+        assert_eq!(pace.standing, Standing::Over);
+        assert!(pace.expected.0 < pace.used.0);
     }
 }

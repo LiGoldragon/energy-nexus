@@ -21,7 +21,7 @@ impl Default for Programs {
     fn default() -> Self {
         Self {
             codex: "codex".into(),
-            flow: "flow-0.49".into(),
+            flow: "flow-0.50".into(),
         }
     }
 }
@@ -440,7 +440,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let log = directory.path().join("flow.log");
-        let program = directory.path().join("flow-0.49");
+        let program = directory.path().join("flow-0.50");
         std::fs::write(
             &program,
             format!(
@@ -466,7 +466,7 @@ printf '%s\n' "$1" > {}
             &Level::Low
         ));
         let transcript = std::fs::read_to_string(log).unwrap();
-        println!("flow-0.49 reminder fixture: {}", transcript.trim());
+        println!("flow-0.50 reminder fixture: {}", transcript.trim());
         assert!(transcript.contains(
             "Send.{ { Mind energyNexus Secondary } Soft.Notice.«Energy Codex is Low.» }"
         ));

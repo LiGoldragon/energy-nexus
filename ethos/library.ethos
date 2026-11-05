@@ -4,7 +4,10 @@ Library
   Percent.Integer
   Instant.Integer
   Minutes.Integer
-  Window.{ Name.[ Session Week ] Used.Percent Resets.Instant Duration.Minutes }
+  Used.Percent
+  Expected.Percent
+  PerDay.Percent
+  Window.{ Name.[ Session Week ] Used Resets.Instant Duration.Minutes }
   ResetId.String
   ResetStatus.[ Available Redeeming Redeemed ]
   Reset.{ ResetId ResetStatus Expires.Instant }
@@ -13,6 +16,8 @@ Library
   Threshold.{ Level Left.Percent }
   Address.{ Aspect.[ Psyche Mind Field ] Topic.String Layer.[ Primary Secondary ] }
   Recipient.Address
-  Reminder.{ Provider Level Recipient } ]
+  Reminder.{ Provider Level Recipient }
+  Target.[ Even SpendBy.Instant ]
+  Pace.{ Provider Target Expected Used Standing.[ Over Under On ] PerDay } ]
 []
 []

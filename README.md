@@ -1,12 +1,14 @@
 # Energy Nexus v1
 
-Energy Nexus reads Claude and Codex quota usage, levels the typed readings, retains history, pushes level changes, sends configured reminders through Flow 0.49, and applies the Codex reset rule.
+Energy Nexus reads Claude and Codex quota usage, levels the typed readings, retains history, pushes level changes, sends configured reminders through Flow 0.50, compares each provider with its pace target, and applies the Codex reset rule.
 
 The processes stay separated:
 
 - `energy-nexus-daemon` owns typed Memory, Operation, public Signal, and meta Signal.
 - `energy-translator` alone holds provider API words, JSON, credentials, Datom, process calls, and reminder prose.
 - `energy-nexus` and `energy-nexus-meta` are text-only clients.
+- `energy-pace` shows both providers' usage per period, target, standing, and daily share.
+- `energy-nexus-poc` runs the separated processes together for an isolated transient deployment.
 
 All process-to-process traffic behind the translator is length-prefixed, validated rkyv signal. Start the daemon and translator with the same runtime directory, then call for example:
 

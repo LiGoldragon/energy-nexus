@@ -1,11 +1,13 @@
-use energy_nexus_core::{Configuring, Memory, RedeemDecision, Redeeming, Remembering, Reminding};
+use energy_nexus_core::{
+    Configuring, Memory, Pacing, RedeemDecision, Redeeming, Remembering, Reminding,
+};
 use energy_nexus_emission::{
     Consumed, Emission, Idempotency, Outcome as ExternalOutcome, Query as EmissionQuery,
     Response as EmissionResponse,
 };
 use energy_nexus_wire::{Framing, Place, SocketPathing};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Changed_Data, Provider, Query, Refused, Response};
+use signal_energy_nexus::{Changed_Data, Provider, Query, Read_Data, Refused, Response};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
@@ -71,7 +73,8 @@ impl Answering for Nexus {
                         });
                     }
                 }
-                Response::Read(reading)
+                let pace = reading.pace(self.memory.configuration());
+                Response::Read(Read_Data { reading, pace })
             }
             _ => Response::Refused(Refused::ProviderDown(provider)),
         }
