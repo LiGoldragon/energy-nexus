@@ -1,19 +1,27 @@
-use energy_nexus_wire::{Framing, Place, SocketPathing};
-use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Name, Provider, Query, Response, Target};
-use std::os::unix::net::UnixStream;
+use datom_codec::{Actualizing, Potential};
+use energy_nexus_translator::{TextClienting, Translator};
+use energy_nexus_wire::{Place, PlaceName};
+use signal_energy_nexus::{Name, Provider, Response, Target};
 
-fn read(place: &Place, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
-    let mut stream = UnixStream::connect(place.public()).map_err(|error| error.to_string())?;
-    let query = Query::Read(provider)
-        .signalize()
-        .map_err(|error| format!("{error:?}"))?;
-    stream
-        .write_frame(query.bytes())
-        .map_err(|error| error.to_string())?;
-    let bytes = stream.read_frame().map_err(|error| error.to_string())?;
-    match Signal::<Response>::from(bytes)
-        .restore()
+fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
+    let text = match provider {
+        Provider::Claude => "Read.Claude",
+        Provider::Codex => "Read.Codex",
+    };
+    let answer = client
+        .request(text, false, false)?
+        .into_iter()
+        .next()
+        .ok_or("no answer")?;
+    let mut budget = datom_codec::Budget {
+        remaining: 100_000,
+        reader: protos::ReaderBudget { remaining: 100_000 },
+        depth: 0,
+        maximum_depth: 128,
+    };
+    let mut potential = Potential::<Response>::from(answer.as_str());
+    match potential
+        .actualize(&mut budget)
         .map_err(|error| format!("{error:?}"))?
     {
         Response::Read(read) => Ok(read),
@@ -44,18 +52,17 @@ fn show(read: signal_energy_nexus::Read_Data) {
 
 fn main() {
     let mut arguments = std::env::args().skip(1);
-    let runtime = arguments
+    let name = arguments
         .next()
-        .map(std::path::PathBuf::from)
-        .expect("usage: energy-pace RUNTIME [Claude|Codex]");
+        .expect("usage: energy-pace PLACE [Claude|Codex]");
     let providers = match arguments.next().as_deref() {
         Some("Claude") => vec![Provider::Claude],
         Some("Codex") => vec![Provider::Codex],
         Some(_) => panic!("provider is Claude or Codex"),
         None => vec![Provider::Claude, Provider::Codex],
     };
-    let place = Place { runtime };
+    let client = Translator::open(Place::resolve(PlaceName(name)).expect("resolve place"));
     for provider in providers {
-        show(read(&place, provider).expect("read energy pace"));
+        show(read(&client, provider).expect("read energy pace"));
     }
 }

@@ -1,6 +1,6 @@
 Memory
-[ energy:[ Provider Reading Level Threshold Reminder Minutes Percent Target ] ]
+[ energy:[ Provider Reading Level Threshold Reminder Minutes Percent ProviderTarget ] ]
 [ Latest.{ Provider Reading Level }
   History.Vector<Reading>
-  Configuration.{ Polling.Minutes Vector<Threshold> Vector<Reminder> RedeemExpiring.Minutes RedeemUsedAtLeast.Percent Vector<Target> }
+  Configuration.{ Polling.Minutes Vector<Threshold> Vector<Reminder> RedeemExpiring.Minutes RedeemUsedAtLeast.Percent Targets.Vector<ProviderTarget> }
   Answer.[ Succeeded Failed.String ] ]

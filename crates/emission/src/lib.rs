@@ -8,14 +8,16 @@ macro_rules! wire {
     };
 }
 wire! {pub struct Idempotency(pub String);}
-wire! {pub enum Emission { CodexRateLimits, CodexConsumeReset { reset_id: ResetId, idempotency: Idempotency }, ClaudeUsage, Send { recipient: Recipient, provider: Provider, level: Level } }}
+wire! {pub struct CodexRateLimits;}
+wire! {pub struct CodexConsumeReset { pub reset_id: ResetId, pub idempotency: Idempotency }}
+wire! {pub struct ClaudeUsage;}
+wire! {pub struct Send { pub recipient: Recipient, pub provider: Provider, pub level: Level }}
+wire! {pub enum Emission { CodexRateLimits(CodexRateLimits), CodexConsumeReset(CodexConsumeReset), ClaudeUsage(ClaudeUsage), Send(Send) }}
 wire! {pub enum Consumed { Reset(Reset), NothingToReset, NoCredit, AlreadyRedeemed }}
 wire! {pub enum Outcome { Observed(Reading), Consumed(Consumed), Sent, Down }}
-pub trait Emittable {
-    type Outcome;
-    fn emission(&self) -> Emission;
+pub trait Emittable<T> {
+    fn emit(&self, translator: &T) -> Outcome;
 }
-pub enum Never {}
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Query {
     Emit(Emission),

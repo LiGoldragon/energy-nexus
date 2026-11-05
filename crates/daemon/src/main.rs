@@ -1,13 +1,14 @@
 use energy_nexus_core::{
-    Configuring, Memory, Pacing, RedeemDecision, Redeeming, Remembering, Reminding,
+    Configuring, LevelChange, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering,
+    Reminding,
 };
 use energy_nexus_emission::{
-    Consumed, Emission, Idempotency, Outcome as ExternalOutcome, Query as EmissionQuery,
-    Response as EmissionResponse,
+    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
+    Outcome as ExternalOutcome, Query as EmissionQuery, Response as EmissionResponse, Send,
 };
 use energy_nexus_wire::{Framing, Place, SocketPathing};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Changed_Data, Provider, Query, Read_Data, Refused, Response};
+use signal_energy_nexus::{Call, Changed_Data, Provider, Query, Read_Data, Refused, Response};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,19 @@ struct Nexus {
     memory: Memory,
     subscribers: Vec<UnixStream>,
     place: Place,
+}
+enum Operation {
+    Reading(Provider),
+    Levelling(signal_energy_nexus::Reading),
+    Reminding(signal_energy_nexus::Reminder, signal_energy_nexus::Reading),
+    Redeeming(Provider),
+}
+enum OperationOutcome {
+    Read(signal_energy_nexus::Reading),
+    Levelled(LevelChange),
+    Reminded,
+    Redeemed(signal_energy_nexus::Reset),
+    Failed(Refused),
 }
 trait Emitting {
     fn emit(&self, emission: Emission) -> Result<ExternalOutcome, String>;
@@ -37,27 +51,90 @@ impl Emitting for Nexus {
         Ok(outcome)
     }
 }
+impl Nexus {
+    fn persist(&self) -> Result<(), String> {
+        self.memory.save(&self.place.state.join("memory.rkyv"))
+    }
+    fn attempt(&mut self, operation: Operation) -> OperationOutcome {
+        match operation {
+            Operation::Reading(provider) => {
+                let emission = match provider {
+                    Provider::Codex => Emission::CodexRateLimits(CodexRateLimits),
+                    Provider::Claude => Emission::ClaudeUsage(ClaudeUsage),
+                };
+                match self.emit(emission) {
+                    Ok(ExternalOutcome::Observed(reading)) => OperationOutcome::Read(reading),
+                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                }
+            }
+            Operation::Levelling(reading) => {
+                let change = self.memory.remember(reading);
+                let _ = self.persist();
+                OperationOutcome::Levelled(change)
+            }
+            Operation::Reminding(reminder, reading) => {
+                let provider = reminder.provider.clone();
+                let level = reading.level(self.memory.configuration());
+                match self.emit(Emission::Send(Send {
+                    recipient: reminder.recipient,
+                    provider: reading.provider,
+                    level,
+                })) {
+                    Ok(ExternalOutcome::Sent) => OperationOutcome::Reminded,
+                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                }
+            }
+            Operation::Redeeming(provider) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_secs() as i64)
+                    .unwrap_or(0);
+                match self.memory.redeem_decision(&provider, now) {
+                    RedeemDecision::Allowed(reset) => {
+                        let key = Idempotency(format!("energy:{}:{}", reset.reset_id.0, now));
+                        match self.emit(Emission::CodexConsumeReset(CodexConsumeReset {
+                            reset_id: reset.reset_id.clone(),
+                            idempotency: key,
+                        })) {
+                            Ok(ExternalOutcome::Consumed(Consumed::Reset(value))) => {
+                                OperationOutcome::Redeemed(value)
+                            }
+                            Ok(ExternalOutcome::Consumed(Consumed::AlreadyRedeemed)) => {
+                                OperationOutcome::Redeemed(reset)
+                            }
+                            _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                        }
+                    }
+                    RedeemDecision::NoReset => OperationOutcome::Failed(Refused::NoReset),
+                    RedeemDecision::Refused(reason) => {
+                        OperationOutcome::Failed(Refused::RuleRefused(reason))
+                    }
+                }
+            }
+        }
+    }
+}
 trait Answering {
-    fn answer(&mut self, query: Query) -> Response;
+    fn answer(&mut self, call: Call) -> Response;
     fn read(&mut self, provider: Provider) -> Response;
     fn redeem(&mut self, provider: Provider) -> Response;
 }
 impl Answering for Nexus {
-    fn answer(&mut self, query: Query) -> Response {
-        match query {
+    fn answer(&mut self, call: Call) -> Response {
+        match call.input {
             Query::Read(provider) => self.read(provider),
             Query::Subscribe => Response::Subscribed,
             Query::Redeem(provider) => self.redeem(provider),
         }
     }
     fn read(&mut self, provider: Provider) -> Response {
-        let emission = match provider {
-            Provider::Codex => Emission::CodexRateLimits,
-            Provider::Claude => Emission::ClaudeUsage,
-        };
-        match self.emit(emission) {
-            Ok(ExternalOutcome::Observed(reading)) => {
-                let change = self.memory.remember(reading.clone());
+        match self.attempt(Operation::Reading(provider.clone())) {
+            OperationOutcome::Read(reading) => {
+                let OperationOutcome::Levelled(change) =
+                    self.attempt(Operation::Levelling(reading.clone()))
+                else {
+                    return Response::Refused(Refused::ProviderDown(provider));
+                };
                 if change.old.as_ref() != Some(&change.latest.level) {
                     let changed = Response::Changed(Changed_Data {
                         provider: provider.clone(),
@@ -66,42 +143,21 @@ impl Answering for Nexus {
                     });
                     push(&mut self.subscribers, &changed);
                     for reminder in self.memory.reminders_for(&provider, &change.latest.level) {
-                        let _ = self.emit(Emission::Send {
-                            recipient: reminder.recipient,
-                            provider: provider.clone(),
-                            level: change.latest.level.clone(),
-                        });
+                        let _ = self.attempt(Operation::Reminding(reminder, reading.clone()));
                     }
                 }
                 let pace = reading.pace(self.memory.configuration());
                 Response::Read(Read_Data { reading, pace })
             }
+            OperationOutcome::Failed(refused) => Response::Refused(refused),
             _ => Response::Refused(Refused::ProviderDown(provider)),
         }
     }
     fn redeem(&mut self, provider: Provider) -> Response {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        match self.memory.redeem_decision(&provider, now) {
-            RedeemDecision::Allowed(reset) => {
-                let key = Idempotency(format!("energy:{}:{}", reset.reset_id.0, now));
-                match self.emit(Emission::CodexConsumeReset {
-                    reset_id: reset.reset_id.clone(),
-                    idempotency: key,
-                }) {
-                    Ok(ExternalOutcome::Consumed(Consumed::Reset(redeemed))) => {
-                        Response::Redeemed(redeemed)
-                    }
-                    Ok(ExternalOutcome::Consumed(Consumed::AlreadyRedeemed)) => {
-                        Response::Redeemed(reset)
-                    }
-                    _ => Response::Refused(Refused::ProviderDown(provider)),
-                }
-            }
-            RedeemDecision::NoReset => Response::Refused(Refused::NoReset),
-            RedeemDecision::Refused(reason) => Response::Refused(Refused::RuleRefused(reason)),
+        match self.attempt(Operation::Redeeming(provider)) {
+            OperationOutcome::Redeemed(reset) => Response::Redeemed(reset),
+            OperationOutcome::Failed(refused) => Response::Refused(refused),
+            _ => Response::Refused(Refused::NoReset),
         }
     }
 }
@@ -117,13 +173,14 @@ trait Serving {
 impl Serving for Place {
     fn serve(self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.runtime)?;
+        std::fs::create_dir_all(&self.state)?;
         for path in [self.public(), self.meta()] {
             let _ = std::fs::remove_file(path);
         }
         let public = UnixListener::bind(self.public())?;
         let meta = UnixListener::bind(self.meta())?;
         let nexus = Arc::new(Mutex::new(Nexus {
-            memory: Memory::default(),
+            memory: Memory::load(&self.state.join("memory.rkyv")).unwrap_or_default(),
             subscribers: Vec::new(),
             place: self.clone(),
         }));
@@ -165,11 +222,11 @@ fn serve_public(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
     let Ok(bytes) = stream.read_frame() else {
         return;
     };
-    let Ok(query) = Signal::<Query>::from(bytes).restore() else {
+    let Ok(call) = Signal::<Call>::from(bytes).restore() else {
         return;
     };
-    let subscribe = matches!(query, Query::Subscribe);
-    let response = nexus.lock().ok().map(|mut n| n.answer(query));
+    let subscribe = matches!(call.input, Query::Subscribe);
+    let response = nexus.lock().ok().map(|mut n| n.answer(call));
     if let Some(response) = response {
         if let Ok(signal) = response.signalize() {
             if stream.write_frame(signal.bytes()).is_ok() && subscribe {
@@ -184,13 +241,16 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
     let Ok(bytes) = stream.read_frame() else {
         return;
     };
-    let Ok(query) = Signal::<meta_signal_energy_nexus::Query>::from(bytes).restore() else {
+    let Ok(call) = Signal::<meta_signal_energy_nexus::Call>::from(bytes).restore() else {
         return;
     };
-    let meta_signal_energy_nexus::Query::Configure(set) = query;
+    let meta_signal_energy_nexus::Query::Configure(set) = call.input;
     let response = match nexus.lock() {
         Ok(mut n) => match n.memory.configure(set) {
-            Ok(applied) => meta_signal_energy_nexus::Response::Configured(applied),
+            Ok(applied) => {
+                let _ = n.persist();
+                meta_signal_energy_nexus::Response::Configured(applied)
+            }
             Err(reason) => meta_signal_energy_nexus::Response::ConfigureRefused(reason),
         },
         Err(_) => meta_signal_energy_nexus::Response::ConfigureRefused("memory unavailable".into()),
@@ -200,9 +260,23 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
     }
 }
 fn main() {
-    let runtime = std::env::args()
-        .nth(1)
+    let mut arguments = std::env::args().skip(1);
+    let name = arguments
+        .next()
+        .expect("usage: energy-daemon NAME RUNTIME STATE");
+    let runtime = arguments
+        .next()
         .map(std::path::PathBuf::from)
-        .expect("usage: energy-daemon RUNTIME");
-    Place { runtime }.serve().expect("serve energy nexus")
+        .expect("runtime");
+    let state = arguments
+        .next()
+        .map(std::path::PathBuf::from)
+        .expect("state");
+    Place {
+        name: energy_nexus_wire::PlaceName(name),
+        runtime,
+        state,
+    }
+    .serve()
+    .expect("serve energy nexus")
 }

@@ -38,9 +38,34 @@ pub trait SocketPathing {
     fn public_translator(&self) -> std::path::PathBuf;
     fn meta_translator(&self) -> std::path::PathBuf;
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceName(pub String);
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
+    pub name: PlaceName,
     pub runtime: std::path::PathBuf,
+    pub state: std::path::PathBuf,
+}
+impl Place {
+    pub fn resolve(name: PlaceName) -> Result<Self, String> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .ok_or("XDG_RUNTIME_DIR is unset")?
+            .join("nexus")
+            .join(&name.0);
+        let state_root = std::env::var_os("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join(".local/state"))
+            })
+            .ok_or("HOME and XDG_STATE_HOME are unset")?;
+        Ok(Self {
+            state: state_root.join("nexus").join(&name.0),
+            runtime,
+            name,
+        })
+    }
 }
 impl SocketPathing for Place {
     fn public(&self) -> std::path::PathBuf {

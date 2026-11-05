@@ -7,3 +7,4 @@ rust-version.workspace=true
 [dependencies]
 signal-energy-nexus.workspace=true
 meta-signal-energy-nexus.workspace=true
+rkyv.workspace=true

@@ -1,23 +1,23 @@
-use meta_signal_energy_nexus::{Set, Target_Data};
+use meta_signal_energy_nexus::{ProviderTarget, Set};
 use signal_energy_nexus::{
     Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus, Standing,
     Target, Threshold,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Latest {
     pub provider: Provider,
     pub reading: Reading,
     pub level: Level,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Configuration {
     pub polling: Minutes,
     pub thresholds: Vec<Threshold>,
     pub reminders: Vec<Reminder>,
     pub redeem_expiring: Minutes,
     pub redeem_used_at_least: Percent,
-    pub targets: Vec<Target_Data>,
+    pub targets: Vec<ProviderTarget>,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -41,11 +41,11 @@ impl Default for Configuration {
             redeem_expiring: Minutes(1440),
             redeem_used_at_least: Percent(1),
             targets: vec![
-                Target_Data {
+                ProviderTarget {
                     provider: Provider::Claude,
                     target: Target::Even,
                 },
-                Target_Data {
+                ProviderTarget {
                     provider: Provider::Codex,
                     target: Target::Even,
                 },
@@ -53,11 +53,30 @@ impl Default for Configuration {
         }
     }
 }
-#[derive(Clone, Debug, Default)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default)]
 pub struct Memory {
     latest: Vec<Latest>,
     history: Vec<Reading>,
     configuration: Configuration,
+}
+impl Memory {
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes).map_err(|error| error.to_string())
+    }
+    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let bytes =
+            rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())?;
+        let temporary = path.with_extension("new");
+        std::fs::write(&temporary, bytes.as_slice()).map_err(|error| error.to_string())?;
+        std::fs::rename(temporary, path).map_err(|error| error.to_string())
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LevelChange {
@@ -228,6 +247,9 @@ impl Configuring for Memory {
                     .retain(|known| known.provider != value.provider);
                 self.configuration.targets.push(value)
             }
+            Set::Program(_) | Set::Credentials(_) => {
+                return Err("translator configuration belongs to the translator".into())
+            }
         }
         Ok(set)
     }
@@ -341,7 +363,7 @@ mod tests {
         value.window_vector[0].resets = Instant(150);
         value.window_vector[0].duration = Minutes(2);
         let mut configuration = Configuration::default();
-        configuration.targets = vec![Target_Data {
+        configuration.targets = vec![ProviderTarget {
             provider: Provider::Codex,
             target: Target::SpendBy(Instant(170)),
         }];
@@ -349,5 +371,41 @@ mod tests {
         assert_eq!(pace.used, Percent(92));
         assert_eq!(pace.standing, Standing::Over);
         assert!(pace.expected.0 < pace.used.0);
+    }
+    #[test]
+    fn memory_survives_a_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "energy-nexus-memory-{}-{}.rkyv",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let mut memory = Memory::default();
+        memory.remember(reading(true, 42));
+        memory
+            .configure(Set::Target(ProviderTarget {
+                provider: Provider::Codex,
+                target: Target::SpendBy(Instant(170)),
+            }))
+            .unwrap();
+        memory.save(&path).unwrap();
+
+        let restored = Memory::load(&path).unwrap();
+        assert_eq!(restored.history().len(), 1);
+        assert_eq!(
+            restored.latest(&Provider::Codex).unwrap().reading,
+            reading(true, 42)
+        );
+        assert_eq!(restored.configuration().targets.len(), 2);
+        assert_eq!(
+            restored
+                .configuration()
+                .targets
+                .iter()
+                .find(|target| target.provider == Provider::Codex)
+                .unwrap()
+                .target,
+            Target::SpendBy(Instant(170))
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

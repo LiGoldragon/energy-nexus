@@ -1,21 +1,23 @@
-use energy_nexus_translator::{Programs, Translating, Translator};
-use energy_nexus_wire::Place;
+use energy_nexus_translator::{Translating, Translator};
+use energy_nexus_wire::{Place, PlaceName};
 fn main() {
-    let runtime = std::env::args()
-        .nth(1)
+    let mut arguments = std::env::args().skip(1);
+    let name = arguments
+        .next()
+        .expect("usage: energy-translator NAME RUNTIME STATE");
+    let runtime = arguments
+        .next()
         .map(std::path::PathBuf::from)
-        .expect("usage: energy-translator RUNTIME");
-    let mut programs = Programs::default();
-    if let Ok(program) = std::env::var("ENERGY_CODEX") {
-        programs.codex = program;
-    }
-    if let Ok(program) = std::env::var("ENERGY_FLOW") {
-        programs.flow = program;
-    }
-    Translator {
-        place: Place { runtime },
-        programs,
-    }
+        .expect("runtime");
+    let state = arguments
+        .next()
+        .map(std::path::PathBuf::from)
+        .expect("state");
+    Translator::open(Place {
+        name: PlaceName(name),
+        runtime,
+        state,
+    })
     .serve()
     .expect("serve translator")
 }

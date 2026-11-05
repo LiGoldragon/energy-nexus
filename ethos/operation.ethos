@@ -1,10 +1,10 @@
 Operation
-[ energy:[ Provider Reading Level Reminder Reset Pace ] ]
+[ energy:[ Provider Reading Level Reminder Reset ] ]
 [ Reading.Provider
   Levelling.Reading
   Reminding.{ Reminder Reading }
   Redeeming.Provider ]
-[ Read.{ Reading Pace }
+[ Read.Reading
   Levelled.Option<Level>
   Reminded
   Redeemed.Reset

@@ -2,14 +2,17 @@ use std::process::{Command, Stdio};
 
 fn main() {
     let mut arguments = std::env::args().skip(1);
+    let name = arguments
+        .next()
+        .expect("usage: energy-nexus-poc NAME RUNTIME STATE");
     let runtime = arguments
         .next()
         .map(std::path::PathBuf::from)
-        .expect("usage: energy-nexus-poc RUNTIME STATE");
+        .expect("usage: energy-nexus-poc NAME RUNTIME STATE");
     let state = arguments
         .next()
         .map(std::path::PathBuf::from)
-        .expect("usage: energy-nexus-poc RUNTIME STATE");
+        .expect("usage: energy-nexus-poc NAME RUNTIME STATE");
     std::fs::create_dir_all(&runtime).expect("create runtime directory");
     std::fs::create_dir_all(&state).expect("create state directory");
     std::fs::write(state.join("deployment"), "Energy Nexus proof of concept\n")
@@ -20,12 +23,16 @@ fn main() {
         .expect("binary directory")
         .to_owned();
     let mut translator = Command::new(directory.join("energy-translator"))
+        .arg(&name)
         .arg(&runtime)
+        .arg(&state)
         .stdin(Stdio::null())
         .spawn()
         .expect("start translator");
     let mut daemon = Command::new(directory.join("energy-nexus-daemon"))
+        .arg(&name)
         .arg(&runtime)
+        .arg(&state)
         .stdin(Stdio::null())
         .spawn()
         .expect("start daemon");

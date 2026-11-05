@@ -1,6 +1,7 @@
 use datom_codec::{Actualizing, Potential};
 use energy_nexus_emission::{
-    Consumed, Emission, Outcome, Query as EmissionQuery, Response as EmissionResponse,
+    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Emittable, Outcome,
+    Query as EmissionQuery, Response as EmissionResponse, Send,
 };
 use energy_nexus_wire::{Framing, Place, SocketPathing};
 use serde_json::{json, Value};
@@ -11,24 +12,18 @@ use signal_energy_nexus::{
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default)]
 pub struct Programs {
-    pub codex: String,
-    pub flow: String,
-}
-impl Default for Programs {
-    fn default() -> Self {
-        Self {
-            codex: "codex".into(),
-            flow: "flow-0.50".into(),
-        }
-    }
+    pub codex: Option<String>,
+    pub flow: Option<String>,
+    pub credentials: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct Translator {
     pub place: Place,
-    pub programs: Programs,
+    pub programs: Arc<Mutex<Programs>>,
 }
 pub trait Translating {
     fn emit(&self, emission: Emission) -> Outcome;
@@ -37,33 +32,10 @@ pub trait Translating {
 impl Translating for Translator {
     fn emit(&self, emission: Emission) -> Outcome {
         match emission {
-            Emission::CodexRateLimits => self
-                .codex_call("account/rateLimits/read", json!({}))
-                .ok()
-                .and_then(|value| codex_reading(&value))
-                .map_or(Outcome::Down, Outcome::Observed),
-            Emission::CodexConsumeReset {
-                reset_id,
-                idempotency,
-            } => self
-                .codex_call(
-                    "account/rateLimitResetCredit/consume",
-                    json!({"creditId":reset_id.0,"idempotencyKey":idempotency.0}),
-                )
-                .map(|value| consume_outcome(&value, reset_id))
-                .unwrap_or(Outcome::Down),
-            Emission::ClaudeUsage => claude_reading().map_or(Outcome::Down, Outcome::Observed),
-            Emission::Send {
-                recipient,
-                provider,
-                level,
-            } => {
-                if send_reminder(&self.programs.flow, &recipient, &provider, &level) {
-                    Outcome::Sent
-                } else {
-                    Outcome::Down
-                }
-            }
+            Emission::CodexRateLimits(value) => value.emit(self),
+            Emission::CodexConsumeReset(value) => value.emit(self),
+            Emission::ClaudeUsage(value) => value.emit(self),
+            Emission::Send(value) => value.emit(self),
         }
     }
     fn serve(&self) -> std::io::Result<()> {
@@ -105,7 +77,13 @@ pub trait CodexCalling {
 impl CodexCalling for Translator {
     fn codex_call(&self, method: &str, params: Value) -> Result<Value, String> {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let mut child = Command::new(&self.programs.codex)
+        let program = self
+            .programs
+            .lock()
+            .ok()
+            .and_then(|programs| programs.codex.clone())
+            .ok_or("Codex program is unconfigured")?;
+        let mut child = Command::new(program)
             .arg("app-server")
             .current_dir(directory.path())
             .stdin(Stdio::piped())
@@ -139,7 +117,107 @@ impl CodexCalling for Translator {
         Err("app-server closed".into())
     }
 }
+impl Emittable<Translator> for CodexRateLimits {
+    fn emit(&self, translator: &Translator) -> Outcome {
+        translator
+            .codex_call("account/rateLimits/read", json!({}))
+            .ok()
+            .and_then(|value| codex_reading(&value))
+            .map_or(Outcome::Down, Outcome::Observed)
+    }
+}
+impl Emittable<Translator> for CodexConsumeReset {
+    fn emit(&self, translator: &Translator) -> Outcome {
+        translator
+            .codex_call(
+                "account/rateLimitResetCredit/consume",
+                json!({"creditId":self.reset_id.0,"idempotencyKey":self.idempotency.0}),
+            )
+            .map(|value| consume_outcome(&value, self.reset_id.clone()))
+            .unwrap_or(Outcome::Down)
+    }
+}
+impl Emittable<Translator> for ClaudeUsage {
+    fn emit(&self, translator: &Translator) -> Outcome {
+        let path = translator
+            .programs
+            .lock()
+            .ok()
+            .and_then(|programs| programs.credentials.clone());
+        path.as_deref()
+            .and_then(claude_reading)
+            .map_or(Outcome::Down, Outcome::Observed)
+    }
+}
+impl Emittable<Translator> for Send {
+    fn emit(&self, translator: &Translator) -> Outcome {
+        let program = translator
+            .programs
+            .lock()
+            .ok()
+            .and_then(|programs| programs.flow.clone());
+        if program.as_deref().is_some_and(|program| {
+            send_reminder(program, &self.recipient, &self.provider, &self.level)
+        }) {
+            Outcome::Sent
+        } else {
+            Outcome::Down
+        }
+    }
+}
 impl Translator {
+    pub fn open(place: Place) -> Self {
+        let path = place.state.join("translator.rkyv");
+        let programs = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| rkyv::from_bytes::<Programs, rkyv::rancor::Error>(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            place,
+            programs: Arc::new(Mutex::new(programs)),
+        }
+    }
+    fn configure(&self, set: &meta_signal_energy_nexus::Set) -> Result<bool, String> {
+        let changed = match set {
+            meta_signal_energy_nexus::Set::Program(value) => {
+                let mut programs = self
+                    .programs
+                    .lock()
+                    .map_err(|_| "translator memory unavailable")?;
+                match value.program {
+                    meta_signal_energy_nexus::Program::Codex => {
+                        programs.codex = Some(value.path.0.clone())
+                    }
+                    meta_signal_energy_nexus::Program::Flow => {
+                        programs.flow = Some(value.path.0.clone())
+                    }
+                }
+                true
+            }
+            meta_signal_energy_nexus::Set::Credentials(value) => {
+                self.programs
+                    .lock()
+                    .map_err(|_| "translator memory unavailable")?
+                    .credentials = Some(value.0.clone());
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            std::fs::create_dir_all(&self.place.state).map_err(|error| error.to_string())?;
+            let programs = self
+                .programs
+                .lock()
+                .map_err(|_| "translator memory unavailable")?;
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&*programs)
+                .map_err(|error| error.to_string())?;
+            let temporary = self.place.state.join("translator.new");
+            std::fs::write(&temporary, bytes.as_slice()).map_err(|error| error.to_string())?;
+            std::fs::rename(temporary, self.place.state.join("translator.rkyv"))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(changed)
+    }
     fn serve_emission(&self, mut stream: UnixStream) {
         let Ok(bytes) = stream.read_frame() else {
             return;
@@ -153,6 +231,9 @@ impl Translator {
         }
     }
     fn serve_public(&self, mut client: UnixStream) {
+        let Some(caller) = caller(&client) else {
+            return;
+        };
         let Ok(text) = client.read_frame().and_then(|v| {
             String::from_utf8(v)
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 text"))
@@ -168,7 +249,11 @@ impl Translator {
         let Ok(mut nexus) = UnixStream::connect(self.place.public()) else {
             return;
         };
-        let Ok(signal) = query.signalize() else {
+        let call = signal_energy_nexus::Call {
+            caller,
+            input: query,
+        };
+        let Ok(signal) = call.signalize() else {
             return;
         };
         if nexus.write_frame(signal.bytes()).is_err() {
@@ -182,13 +267,16 @@ impl Translator {
             else {
                 return;
             };
-            let text = shared_translator::encode(&response);
+            let text = encode(&response);
             if client.write_frame(text.as_bytes()).is_err() || !subscribe {
                 return;
             }
         }
     }
     fn serve_meta(&self, mut client: UnixStream) {
+        let Some(caller) = caller(&client) else {
+            return;
+        };
         let Ok(text) = client.read_frame().and_then(|v| {
             String::from_utf8(v)
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 text"))
@@ -200,10 +288,28 @@ impl Translator {
         let Ok(query) = potential.actualize(&mut budget) else {
             return;
         };
+        let meta_signal_energy_nexus::Query::Configure(set) = &query;
+        match self.configure(set) {
+            Ok(true) => {
+                let response = meta_signal_energy_nexus::Response::Configured(set.clone());
+                let _ = client.write_frame(encode(&response).as_bytes());
+                return;
+            }
+            Err(reason) => {
+                let response = meta_signal_energy_nexus::Response::ConfigureRefused(reason);
+                let _ = client.write_frame(encode(&response).as_bytes());
+                return;
+            }
+            Ok(false) => {}
+        }
         let Ok(mut nexus) = UnixStream::connect(self.place.meta()) else {
             return;
         };
-        let Ok(signal) = query.signalize() else {
+        let call = meta_signal_energy_nexus::Call {
+            caller,
+            input: query,
+        };
+        let Ok(signal) = call.signalize() else {
             return;
         };
         if nexus.write_frame(signal.bytes()).is_err() {
@@ -216,8 +322,20 @@ impl Translator {
         else {
             return;
         };
-        let _ = client.write_frame(shared_translator::encode(&response).as_bytes());
+        let _ = client.write_frame(encode(&response).as_bytes());
     }
+}
+fn caller(stream: &UnixStream) -> Option<signal_energy_nexus::Caller> {
+    let credentials =
+        nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials).ok()?;
+    Some(signal_energy_nexus::Caller {
+        process_id: credentials.pid() as i64,
+        user_id: credentials.uid() as i64,
+    })
+}
+fn encode<T: datom_codec::Datomizable>(value: &T) -> String {
+    use protos::{Protosizable, Textualizable};
+    value.datomize(Vec::new()).protosize().textualize()
 }
 fn budget() -> datom_codec::Budget {
     datom_codec::Budget {
@@ -331,11 +449,8 @@ fn codex_reading(value: &Value) -> Option<Reading> {
         at: Instant(now()),
     })
 }
-fn claude_reading() -> Option<Reading> {
-    let home = std::env::var("HOME").ok()?;
-    let text =
-        std::fs::read_to_string(std::path::Path::new(&home).join(".claude/.credentials.json"))
-            .ok()?;
+fn claude_reading(credentials_path: &str) -> Option<Reading> {
+    let text = std::fs::read_to_string(credentials_path).ok()?;
     let credentials: Value = serde_json::from_str(&text).ok()?;
     let oauth = credentials.get("claudeAiOauth")?;
     let token = oauth.get("accessToken")?.as_str()?;
@@ -409,7 +524,7 @@ fn send_reminder(
     let address = &recipient.0;
     let datom = format!(
         "Send.{{ {{ {:?} {} {:?} }} Soft.Notice.«Energy {:?} is {:?}.» }}",
-        address.aspect, address.topic.0, address.layer, provider, level
+        address.aspect, address.topic, address.layer, provider, level
     );
     Command::new(program)
         .arg(datom)
@@ -440,7 +555,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let log = directory.path().join("flow.log");
-        let program = directory.path().join("flow-0.50");
+        let program = directory.path().join("flow-0.51");
         std::fs::write(
             &program,
             format!(
@@ -455,9 +570,9 @@ printf '%s\n' "$1" > {}
         permissions.set_mode(0o700);
         std::fs::set_permissions(&program, permissions).unwrap();
         let recipient = signal_energy_nexus::Recipient(signal_energy_nexus::Address {
-            aspect: signal_energy_nexus::Aspect::Mind,
-            topic: signal_energy_nexus::Topic("energyNexus".into()),
-            layer: signal_energy_nexus::Layer::Secondary,
+            aspect: signal_flow::Aspect::Mind,
+            topic: "energyNexus".into(),
+            layer: signal_flow::Layer::Secondary,
         });
         assert!(send_reminder(
             program.to_str().unwrap(),
@@ -466,7 +581,7 @@ printf '%s\n' "$1" > {}
             &Level::Low
         ));
         let transcript = std::fs::read_to_string(log).unwrap();
-        println!("flow-0.50 reminder fixture: {}", transcript.trim());
+        println!("flow-0.51 reminder fixture: {}", transcript.trim());
         assert!(transcript.contains(
             "Send.{ { Mind energyNexus Secondary } Soft.Notice.«Energy Codex is Low.» }"
         ));
