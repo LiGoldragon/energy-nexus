@@ -1,7 +1,7 @@
 use datom_codec::{Actualizing, Potential};
 use energy_nexus_translator::{TextClienting, Translator};
 use energy_nexus_wire::{Place, PlaceName};
-use signal_energy_nexus::{Name, Provider, Response, Target};
+use signal_energy_nexus::{Provider, Response, Target};
 
 fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
     let text = match provider {
@@ -30,24 +30,31 @@ fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::
 }
 
 fn show(read: signal_energy_nexus::Read_Data) {
-    let pace = read.pace;
-    let window = read
-        .reading
-        .window_vector
-        .iter()
-        .find(|window| window.name == Name::Week)
-        .or_else(|| read.reading.window_vector.first());
-    let period = window
-        .map(|window| format!("{} days", window.duration.0 as f64 / 1_440.0))
-        .unwrap_or_else(|| "the current period".into());
-    let target = match pace.target {
-        Target::Even => "evenly".into(),
-        Target::SpendBy(instant) => format!("by {}", instant.0),
-    };
-    println!(
-        "{:?}: {}% used over {}; target {} expects {}% now; {:?}, with {}% per day from here.",
-        pace.provider, pace.used.0, period, target, pace.expected.0, pace.standing, pace.per_day.0
-    );
+    for pace in read.pace_vector {
+        let window = read
+            .reading
+            .window_vector
+            .iter()
+            .find(|window| window.name == pace.name);
+        let period = window
+            .map(|window| format!("{} days", window.duration.0 as f64 / 1_440.0))
+            .unwrap_or_else(|| "the current period".into());
+        let target = match pace.target {
+            Target::Even => "evenly".into(),
+            Target::SpendBy(instant) => format!("by {}", instant.0),
+        };
+        println!(
+            "{:?} {:?}: {}% used over {}; target {} expects {}% now; {:?}, with {}% per day from here.",
+            pace.provider,
+            pace.name,
+            pace.used.0,
+            period,
+            target,
+            pace.expected.0,
+            pace.standing,
+            pace.per_day.0
+        );
+    }
 }
 
 fn main() {

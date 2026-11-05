@@ -1,4 +1,4 @@
-use meta_signal_energy_nexus::{ProviderTarget, Set};
+use meta_signal_energy_nexus::{ProviderTarget, Set, WindowTarget};
 use signal_energy_nexus::{
     Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus, Standing,
     Target, Threshold,
@@ -18,6 +18,7 @@ pub struct Configuration {
     pub redeem_expiring: Minutes,
     pub redeem_used_at_least: Percent,
     pub targets: Vec<ProviderTarget>,
+    pub window_targets: Vec<WindowTarget>,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -50,6 +51,7 @@ impl Default for Configuration {
                     target: Target::Even,
                 },
             ],
+            window_targets: Vec::new(),
         }
     }
 }
@@ -59,13 +61,45 @@ pub struct Memory {
     history: Vec<Reading>,
     configuration: Configuration,
 }
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct PreviousConfiguration {
+    polling: Minutes,
+    thresholds: Vec<Threshold>,
+    reminders: Vec<Reminder>,
+    redeem_expiring: Minutes,
+    redeem_used_at_least: Percent,
+    targets: Vec<ProviderTarget>,
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct PreviousMemory {
+    latest: Vec<Latest>,
+    history: Vec<Reading>,
+    configuration: PreviousConfiguration,
+}
 impl Memory {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes).map_err(|error| error.to_string())
+        if let Ok(memory) = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes) {
+            return Ok(memory);
+        }
+        let previous = rkyv::from_bytes::<PreviousMemory, rkyv::rancor::Error>(&bytes)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            latest: previous.latest,
+            history: previous.history,
+            configuration: Configuration {
+                polling: previous.configuration.polling,
+                thresholds: previous.configuration.thresholds,
+                reminders: previous.configuration.reminders,
+                redeem_expiring: previous.configuration.redeem_expiring,
+                redeem_used_at_least: previous.configuration.redeem_used_at_least,
+                targets: previous.configuration.targets,
+                window_targets: Vec::new(),
+            },
+        })
     }
     pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
@@ -91,57 +125,58 @@ pub enum RedeemDecision {
 }
 
 pub trait Pacing {
-    fn pace(&self, configuration: &Configuration) -> Pace;
+    fn pace(&self, configuration: &Configuration) -> Vec<Pace>;
 }
 impl Pacing for Reading {
-    fn pace(&self, configuration: &Configuration) -> Pace {
-        let target = configuration
-            .targets
+    fn pace(&self, configuration: &Configuration) -> Vec<Pace> {
+        self.window_vector
             .iter()
-            .find(|configured| configured.provider == self.provider)
-            .map(|configured| configured.target.clone())
-            .unwrap_or(Target::Even);
-        let window = self
-            .window_vector
-            .iter()
-            .find(|window| window.name == signal_energy_nexus::Name::Week)
-            .or_else(|| {
-                self.window_vector
+            .map(|window| {
+                let target = configuration
+                    .window_targets
                     .iter()
-                    .max_by_key(|window| window.duration.0)
-            });
-        let used = window
-            .map(|window| window.used.0)
-            .unwrap_or(0)
-            .clamp(0, 100);
-        let (start, natural_end) = window
-            .map(|window| (window.resets.0 - window.duration.0 * 60, window.resets.0))
-            .unwrap_or((self.at.0, self.at.0));
-        let deadline = match &target {
-            Target::Even => natural_end,
-            Target::SpendBy(instant) => instant.0,
-        };
-        let span = (deadline - start).max(1);
-        let elapsed = (self.at.0 - start).clamp(0, span);
-        let expected = ((elapsed * 100 + span / 2) / span).clamp(0, 100);
-        let seconds_left = (deadline - self.at.0).max(1);
-        let per_day = if used >= 100 || deadline <= self.at.0 {
-            0
-        } else {
-            (((100 - used) * 86_400 + seconds_left / 2) / seconds_left).max(1)
-        };
-        Pace {
-            provider: self.provider.clone(),
-            target,
-            expected: Percent(expected),
-            used: Percent(used),
-            standing: match used.cmp(&expected) {
-                std::cmp::Ordering::Greater => Standing::Over,
-                std::cmp::Ordering::Less => Standing::Under,
-                std::cmp::Ordering::Equal => Standing::On,
-            },
-            per_day: Percent(per_day),
-        }
+                    .find(|configured| {
+                        configured.provider == self.provider && configured.name == window.name
+                    })
+                    .map(|configured| configured.target.clone())
+                    .or_else(|| {
+                        configuration
+                            .targets
+                            .iter()
+                            .find(|configured| configured.provider == self.provider)
+                            .map(|configured| configured.target.clone())
+                    })
+                    .unwrap_or(Target::Even);
+                let used = window.used.0.clamp(0, 100);
+                let start = window.resets.0 - window.duration.0 * 60;
+                let deadline = match &target {
+                    Target::Even => window.resets.0,
+                    Target::SpendBy(instant) => instant.0,
+                };
+                let span = (deadline - start).max(1);
+                let elapsed = (self.at.0 - start).clamp(0, span);
+                let expected = ((elapsed * 100 + span / 2) / span).clamp(0, 100);
+                let seconds_left = (deadline - self.at.0).max(1);
+                let per_day = if used >= 100 || deadline <= self.at.0 {
+                    0
+                } else {
+                    (((100 - used) * 86_400 + seconds_left / 2) / seconds_left).max(1)
+                };
+                Pace {
+                    provider: self.provider.clone(),
+                    name: window.name.clone(),
+                    target,
+                    expected: Percent(expected),
+                    used: Percent(used),
+                    standing: match used.cmp(&expected) {
+                        std::cmp::Ordering::Greater => Standing::Over,
+                        std::cmp::Ordering::Less => Standing::Under,
+                        std::cmp::Ordering::Equal => Standing::On,
+                    },
+                    per_day: Percent(per_day),
+                }
+            })
+            .collect()
     }
 }
 
@@ -246,6 +281,12 @@ impl Configuring for Memory {
                     .targets
                     .retain(|known| known.provider != value.provider);
                 self.configuration.targets.push(value)
+            }
+            Set::WindowTarget(value) => {
+                self.configuration
+                    .window_targets
+                    .retain(|known| known.provider != value.provider || known.name != value.name);
+                self.configuration.window_targets.push(value)
             }
             Set::Program(_) | Set::Credentials(_) => {
                 return Err("translator configuration belongs to the translator".into())
@@ -385,10 +426,32 @@ mod tests {
             provider: Provider::Codex,
             target: Target::SpendBy(Instant(170)),
         }];
-        let pace = value.pace(&configuration);
+        let pace = value.pace(&configuration).remove(0);
         assert_eq!(pace.used, Percent(92));
         assert_eq!(pace.standing, Standing::Over);
         assert!(pace.expected.0 < pace.used.0);
+    }
+    #[test]
+    fn window_target_overrides_provider_default() {
+        let mut value = reading(true, 40);
+        value.window_vector.push(Window {
+            name: Name::FableWeek,
+            used: Percent(60),
+            resets: Instant(200),
+            duration: Minutes(10080),
+        });
+        let mut configuration = Configuration::default();
+        configuration.window_targets = vec![WindowTarget {
+            provider: Provider::Codex,
+            name: Name::FableWeek,
+            target: Target::SpendBy(Instant(220)),
+        }];
+        let pace = value.pace(&configuration);
+        assert_eq!(pace.len(), 2);
+        assert_eq!(pace[0].name, Name::Week);
+        assert_eq!(pace[0].target, Target::Even);
+        assert_eq!(pace[1].name, Name::FableWeek);
+        assert_eq!(pace[1].target, Target::SpendBy(Instant(220)));
     }
     #[test]
     fn memory_survives_a_restart() {
@@ -424,6 +487,32 @@ mod tests {
                 .target,
             Target::SpendBy(Instant(170))
         );
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn previous_memory_is_upgraded_once() {
+        let path = std::env::temp_dir().join(format!(
+            "energy-nexus-previous-memory-{}.rkyv",
+            std::process::id()
+        ));
+        let defaults = Configuration::default();
+        let previous = PreviousMemory {
+            latest: Vec::new(),
+            history: vec![reading(true, 42)],
+            configuration: PreviousConfiguration {
+                polling: defaults.polling,
+                thresholds: defaults.thresholds,
+                reminders: defaults.reminders,
+                redeem_expiring: defaults.redeem_expiring,
+                redeem_used_at_least: defaults.redeem_used_at_least,
+                targets: defaults.targets,
+            },
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&previous).unwrap();
+        std::fs::write(&path, bytes.as_slice()).unwrap();
+        let upgraded = Memory::load(&path).unwrap();
+        assert_eq!(upgraded.history().len(), 1);
+        assert!(upgraded.configuration().window_targets.is_empty());
         std::fs::remove_file(path).unwrap();
     }
 }

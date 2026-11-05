@@ -453,8 +453,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-energy-nexus"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=3480f2af9dc45646426c4fdd1f6ce438b624b286#3480f2af9dc45646426c4fdd1f6ce438b624b286"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=c20f401c25c0f58570298ddcdb4c0c2bbdb673d8#c20f401c25c0f58570298ddcdb4c0c2bbdb673d8"
 dependencies = [
  "datom-codec 0.32.2",
  "protos",
@@ -777,8 +777,8 @@ dependencies = [
 
 [[package]]
 name = "signal-energy-nexus"
-version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=3c59145aa04b76cfbf139d49eb8cf9a4d8a02c04#3c59145aa04b76cfbf139d49eb8cf9a4d8a02c04"
+version = "0.2.0"
+source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=226ff14f28913258869f13819807111ce35713f5#226ff14f28913258869f13819807111ce35713f5"
 dependencies = [
  "datom-codec 0.32.2",
  "protos",

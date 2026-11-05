@@ -493,6 +493,30 @@ fn claude_document(value: &Value) -> Option<Reading> {
             duration: Minutes(duration),
         });
     }
+    if let (Some(week), Some(scoped)) = (
+        value.get("seven_day").filter(|value| !value.is_null()),
+        value
+            .get("weekly_scoped_shares")
+            .and_then(Value::as_array)
+            .and_then(|shares| shares.first()),
+    ) {
+        let allowance = scoped
+            .get("allowance_percent_of_weekly")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let used = scoped
+            .get("used_percent_of_weekly")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if allowance > 0.0 {
+            windows.push(Window {
+                name: Name::FableWeek,
+                used: Percent((used * 100.0 / allowance).round() as i64),
+                resets: Instant(rfc3339(week.get("resets_at").unwrap_or(&Value::Null))),
+                duration: Minutes(10080),
+            });
+        }
+    }
     Some(Reading {
         provider: Provider::Claude,
         allowed: true,
@@ -544,10 +568,22 @@ mod tests {
     }
     #[test]
     fn claude_fixture_maps_named_windows() {
-        let value = json!({"five_hour":{"utilization":8.0,"resets_at":"2026-11-04T10:00:00Z"},"seven_day":{"utilization":34.0,"resets_at":"2026-11-08T10:00:00Z"}});
+        let value = json!({"five_hour":{"utilization":8.0,"resets_at":"2026-11-04T10:00:00Z"},"seven_day":{"utilization":34.0,"resets_at":"2026-11-08T10:00:00Z"},"weekly_scoped_shares":[{"allowance_percent_of_weekly":50.0,"used_percent_of_weekly":31.5} ]});
         let reading = claude_document(&value).unwrap();
         assert_eq!(reading.window_vector[1].name, Name::Week);
         assert_eq!(reading.window_vector[1].used, Percent(34));
+        assert_eq!(reading.window_vector[2].name, Name::FableWeek);
+        assert_eq!(reading.window_vector[2].used, Percent(63));
+    }
+    #[test]
+    fn claude_missing_window_is_absent() {
+        let value = json!({"five_hour":{"utilization":8.0,"resets_at":"2026-11-04T10:00:00Z"},"seven_day":{"utilization":34.0,"resets_at":"2026-11-08T10:00:00Z"},"weekly_scoped_shares":[]});
+        let reading = claude_document(&value).unwrap();
+        assert_eq!(reading.window_vector.len(), 2);
+        assert!(reading
+            .window_vector
+            .iter()
+            .all(|window| window.name != Name::FableWeek));
     }
     #[test]
     fn flow_reminder_fixture_records_one_soft_notice() {

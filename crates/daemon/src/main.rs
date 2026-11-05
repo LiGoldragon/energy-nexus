@@ -146,8 +146,11 @@ impl Answering for Nexus {
                         let _ = self.attempt(Operation::Reminding(reminder, reading.clone()));
                     }
                 }
-                let pace = reading.pace(self.memory.configuration());
-                Response::Read(Read_Data { reading, pace })
+                let pace_vector = reading.pace(self.memory.configuration());
+                Response::Read(Read_Data {
+                    reading,
+                    pace_vector,
+                })
             }
             OperationOutcome::Failed(refused) => Response::Refused(refused),
             _ => Response::Refused(Refused::ProviderDown(provider)),
