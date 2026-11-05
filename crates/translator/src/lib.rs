@@ -99,7 +99,6 @@ impl CodexCalling for Translator {
         ] {
             writeln!(input, "{request}").map_err(|e| e.to_string())?;
         }
-        drop(input);
         let output = child.stdout.take().ok_or("app-server stdout")?;
         for line in BufReader::new(output).lines().map_while(Result::ok) {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -585,5 +584,12 @@ printf '%s\n' "$1" > {}
         assert!(transcript.contains(
             "Send.{ { Mind energyNexus Secondary } Soft.Notice.«Energy Codex is Low.» }"
         ));
+    }
+    #[test]
+    fn meta_query_text_fixture() {
+        let query = meta_signal_energy_nexus::Query::Configure(
+            meta_signal_energy_nexus::Set::Polling(Minutes(5)),
+        );
+        assert_eq!(encode(&query), "Configure.Polling.{ 5 }");
     }
 }
