@@ -1,12 +1,12 @@
 Signal
-[ energy:[ Reading ResetId Recipient Level Provider ] ]
-[ Emit.Emission ]
-[ Emitted.Outcome ]
-[ Emission.[ CodexRateLimits
-             CodexConsumeReset.{ ResetId Idempotency.String }
+[ energy:[ Reading ResetId Recipient Level Provider ] ]    ; imports Energy Nexus vocabulary
+[ Emit.Emission ]                                          ; the short-term Signal wrapper for emissions
+[ Emitted.Outcome ]                                        ; answers the wrapped emission
+[ Emission.[ CodexRateLimits                               ; one external call per emission variant
+             CodexConsumeReset.{ ResetId Idempotency.String } ; consumes one reset idempotently
              ClaudeUsage
-             Send.{ Recipient Provider Level } ]
-  Outcome.[ Observed.Reading
-            Consumed.[ Reset NothingToReset NoCredit AlreadyRedeemed ]
+             Send.{ Recipient Provider Level } ]           ; sends one reminder
+  Outcome.[ Observed.Reading                               ; what the translator observed
+            Consumed.[ Reset NothingToReset NoCredit AlreadyRedeemed ] ; the reset-consumption outcomes
             Sent
             Down ] ]

@@ -1,23 +1,23 @@
 Library
-[ flow:[ Address ] ]
-[ Provider.[ Claude Codex ]
+[ flow:[ Address ] ]                                      ; imports the Flow Nexus reminder address
+[ Provider.[ Claude Codex ]                               ; the providers whose energy is observed
   Percent.Integer
   Instant.Integer
   Minutes.Integer
   Used.Percent
   Expected.Percent
   PerDay.Percent
-  Window.{ Name.[ Session Week ] Used Resets.Instant Duration.Minutes }
+  Window.{ Name.[ Session Week ] Used Resets.Instant Duration.Minutes } ; one provider rate-limit window
   ResetId.String
-  ResetStatus.[ Available Redeeming Redeemed ]
-  Reset.{ ResetId ResetStatus Expires.Instant }
-  Reading.{ Provider Allowed.Boolean Vector<Window> Vector<Reset> At.Instant }
-  Level.[ Plenty Fair Low Out ]
-  Threshold.{ Level Left.Percent }
+  ResetStatus.[ Available Redeeming Redeemed ]             ; the provider's reset-credit state
+  Reset.{ ResetId ResetStatus Expires.Instant }            ; one reset credit
+  Reading.{ Provider Allowed.Boolean Vector<Window> Vector<Reset> At.Instant } ; one live provider observation
+  Level.[ Plenty Fair Low Out ]                            ; the derived availability level
+  Threshold.{ Level Left.Percent }                         ; one level boundary
   Recipient.Address
-  Reminder.{ Provider Level Recipient }
-  Target.[ Even SpendBy.Instant ]
-  ProviderTarget.{ Provider Target }
-  Pace.{ Provider Target Expected Used Standing.[ Over Under On ] PerDay } ]
-[]
-[]
+  Reminder.{ Provider Level Recipient }                    ; a reminder destination and crossing
+  Target.[ Even SpendBy.Instant ]                          ; how usage is intended to be spent
+  ProviderTarget.{ Provider Target }                       ; one provider's pace target
+  Pace.{ Provider Target Expected Used Standing.[ Over Under On ] PerDay } ] ; actual usage against its target
+[]                                                         ; traits
+[]                                                         ; associations

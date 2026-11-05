@@ -1,12 +1,12 @@
 Operation
-[ energy:[ Provider Reading Level Reminder Reset ] ]
-[ Reading.Provider
+[ energy:[ Provider Reading Level Reminder Reset ] ]       ; imports Energy Nexus vocabulary
+[ Reading.Provider                                         ; attempts one live provider reading
   Levelling.Reading
-  Reminding.{ Reminder Reading }
+  Reminding.{ Reminder Reading }                           ; attempts one configured reminder
   Redeeming.Provider ]
-[ Read.Reading
+[ Read.Reading                                             ; outcomes of the attempts above
   Levelled.Option<Level>
   Reminded
   Redeemed.Reset
-  Failed.[ ProviderDown NoReset RuleRefused.String ] ]
-[]
+  Failed.[ ProviderDown NoReset RuleRefused.String ] ]     ; typed operation failures
+[]                                                         ; local operation types

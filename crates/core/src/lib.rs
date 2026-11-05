@@ -313,7 +313,25 @@ impl Reminding for Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ethos_zero::{Actualizing, File, Potential, Validating};
     use signal_energy_nexus::{Instant, Name, Window};
+
+    fn assert_ethos(source: &str) {
+        let file = Potential::<File>::from(source).actualize().unwrap();
+        file.validate().unwrap();
+    }
+
+    #[test]
+    fn ethos_declarations_check() {
+        for source in [
+            include_str!("../../../ethos/library.ethos"),
+            include_str!("../../../ethos/operation.ethos"),
+            include_str!("../../../ethos/memory.ethos"),
+            include_str!("../../../ethos/emission.ethos"),
+        ] {
+            assert_ethos(source);
+        }
+    }
     fn reading(allowed: bool, used: i64) -> Reading {
         Reading {
             provider: Provider::Codex,
