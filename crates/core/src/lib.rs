@@ -61,45 +61,13 @@ pub struct Memory {
     history: Vec<Reading>,
     configuration: Configuration,
 }
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct PreviousConfiguration {
-    polling: Minutes,
-    thresholds: Vec<Threshold>,
-    reminders: Vec<Reminder>,
-    redeem_expiring: Minutes,
-    redeem_used_at_least: Percent,
-    targets: Vec<ProviderTarget>,
-}
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct PreviousMemory {
-    latest: Vec<Latest>,
-    history: Vec<Reading>,
-    configuration: PreviousConfiguration,
-}
 impl Memory {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         if !path.exists() {
             return Ok(Self::default());
         }
         let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-        if let Ok(memory) = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes) {
-            return Ok(memory);
-        }
-        let previous = rkyv::from_bytes::<PreviousMemory, rkyv::rancor::Error>(&bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(Self {
-            latest: previous.latest,
-            history: previous.history,
-            configuration: Configuration {
-                polling: previous.configuration.polling,
-                thresholds: previous.configuration.thresholds,
-                reminders: previous.configuration.reminders,
-                redeem_expiring: previous.configuration.redeem_expiring,
-                redeem_used_at_least: previous.configuration.redeem_used_at_least,
-                targets: previous.configuration.targets,
-                window_targets: Vec::new(),
-            },
-        })
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes).map_err(|error| error.to_string())
     }
     pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
@@ -487,32 +455,6 @@ mod tests {
                 .target,
             Target::SpendBy(Instant(170))
         );
-        std::fs::remove_file(path).unwrap();
-    }
-    #[test]
-    fn previous_memory_is_upgraded_once() {
-        let path = std::env::temp_dir().join(format!(
-            "energy-nexus-previous-memory-{}.rkyv",
-            std::process::id()
-        ));
-        let defaults = Configuration::default();
-        let previous = PreviousMemory {
-            latest: Vec::new(),
-            history: vec![reading(true, 42)],
-            configuration: PreviousConfiguration {
-                polling: defaults.polling,
-                thresholds: defaults.thresholds,
-                reminders: defaults.reminders,
-                redeem_expiring: defaults.redeem_expiring,
-                redeem_used_at_least: defaults.redeem_used_at_least,
-                targets: defaults.targets,
-            },
-        };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&previous).unwrap();
-        std::fs::write(&path, bytes.as_slice()).unwrap();
-        let upgraded = Memory::load(&path).unwrap();
-        assert_eq!(upgraded.history().len(), 1);
-        assert!(upgraded.configuration().window_targets.is_empty());
         std::fs::remove_file(path).unwrap();
     }
 }
