@@ -1,0 +1,12 @@
+Operation
+[ energy:[ Provider Reading Level Reminder Reset ] ]
+[ Reading.Provider
+  Levelling.Reading
+  Reminding.{ Reminder Reading }
+  Redeeming.Provider ]
+[ Read.Reading
+  Levelled.Option<Level>
+  Reminded
+  Redeemed.Reset
+  Failed.[ ProviderDown NoReset RuleRefused.String ] ]
+[]

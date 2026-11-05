@@ -1,0 +1,13 @@
+[package]
+name="energy-nexus-daemon"
+version="0.1.0"
+edition.workspace=true
+rust-version.workspace=true
+
+[dependencies]
+energy-nexus-core={path="../core"}
+energy-nexus-emission={path="../emission"}
+energy-nexus-wire={path="../wire"}
+signal-energy-nexus.workspace=true
+meta-signal-energy-nexus.workspace=true
+signal.workspace=true

@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/core", "crates/emission", "crates/wire", "crates/daemon", "crates/translator"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+
+[workspace.dependencies]
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "9647288a8e60d28dce245672212067fc8e716d4a", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "0cece506fda242d264055b6e18b1a1843dd154ea", default-features = false }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }

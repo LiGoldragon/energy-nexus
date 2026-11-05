@@ -1,0 +1,9 @@
+[package]
+name="energy-nexus-core"
+version="0.1.0"
+edition.workspace=true
+rust-version.workspace=true
+
+[dependencies]
+signal-energy-nexus.workspace=true
+meta-signal-energy-nexus.workspace=true

@@ -1,0 +1,18 @@
+Library
+[]
+[ Provider.[ Claude Codex ]
+  Percent.Integer
+  Instant.Integer
+  Minutes.Integer
+  Window.{ Name.[ Session Week ] Used.Percent Resets.Instant Duration.Minutes }
+  ResetId.String
+  ResetStatus.[ Available Redeeming Redeemed ]
+  Reset.{ ResetId ResetStatus Expires.Instant }
+  Reading.{ Provider Allowed.Boolean Vector<Window> Vector<Reset> At.Instant }
+  Level.[ Plenty Fair Low Out ]
+  Threshold.{ Level Left.Percent }
+  Address.{ Aspect.[ Psyche Mind Field ] Topic.String Layer.[ Primary Secondary ] }
+  Recipient.Address
+  Reminder.{ Provider Level Recipient } ]
+[]
+[]

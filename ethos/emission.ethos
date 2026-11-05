@@ -1,0 +1,12 @@
+Signal
+[ energy:[ Reading ResetId Recipient Level Provider ] ]
+[ Emit.Emission ]
+[ Emitted.Outcome ]
+[ Emission.[ CodexRateLimits
+             CodexConsumeReset.{ ResetId Idempotency.String }
+             ClaudeUsage
+             Send.{ Recipient Provider Level } ]
+  Outcome.[ Observed.Reading
+            Consumed.[ Reset NothingToReset NoCredit AlreadyRedeemed ]
+            Sent
+            Down ] ]
