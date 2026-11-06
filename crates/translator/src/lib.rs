@@ -83,15 +83,15 @@ impl CodexCalling for Translator {
             .ok()
             .and_then(|programs| programs.codex.clone())
             .ok_or("Codex program is unconfigured")?;
-        let mut child = Command::new(program)
+        let mut server = AppServer(Command::new(program)
             .arg("app-server")
             .current_dir(directory.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| e.to_string())?;
-        let mut input = child.stdin.take().ok_or("app-server stdin")?;
+            .map_err(|e| e.to_string())?);
+        let mut input = server.0.stdin.take().ok_or("app-server stdin")?;
         for request in [
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"energy-nexus","title":"energy-nexus","version":"1"}}}),
             json!({"jsonrpc":"2.0","method":"initialized"}),
@@ -99,21 +99,27 @@ impl CodexCalling for Translator {
         ] {
             writeln!(input, "{request}").map_err(|e| e.to_string())?;
         }
-        let output = child.stdout.take().ok_or("app-server stdout")?;
+        let output = server.0.stdout.take().ok_or("app-server stdout")?;
         for line in BufReader::new(output).lines().map_while(Result::ok) {
             let Ok(value) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             if value.get("id").and_then(Value::as_i64) == Some(2) {
-                let _ = child.kill();
                 return value
                     .get("result")
                     .cloned()
                     .ok_or_else(|| "app-server refused".into());
             }
         }
-        let _ = child.kill();
         Err("app-server closed".into())
+    }
+}
+/// A spawned Codex app-server, killed and reaped when it goes out of scope.
+struct AppServer(std::process::Child);
+impl Drop for AppServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 impl Emittable<Translator> for CodexRateLimits {
@@ -620,6 +626,46 @@ printf '%s\n' "$1" > {}
         assert!(transcript.contains(
             "Send.{ { Mind energyNexus Secondary } Soft.Notice.«Energy Codex is Low.» }"
         ));
+    }
+    #[test]
+    fn codex_app_server_is_reaped_after_its_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let pid = directory.path().join("app-server.pid");
+        let program = directory.path().join("codex");
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+echo $$ > {}
+read a; read b; read c
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"ok":true}}}}'
+sleep 60
+"#,
+                pid.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let translator = Translator {
+            place: Place {
+                name: energy_nexus_wire::PlaceName("test".into()),
+                runtime: directory.path().into(),
+                state: directory.path().into(),
+            },
+            programs: Arc::new(Mutex::new(Programs {
+                codex: Some(program.to_str().unwrap().into()),
+                ..Programs::default()
+            })),
+        };
+        let value = translator.codex_call("account/rateLimits/read", json!({})).unwrap();
+        assert_eq!(value, json!({"ok":true}));
+        let child = std::fs::read_to_string(pid).unwrap();
+        let process = std::path::Path::new("/proc").join(child.trim());
+        println!("app-server {} after the call: {}", child.trim(), process.exists());
+        assert!(!process.exists(), "the app-server is reaped, no zombie left");
     }
     #[test]
     fn meta_query_text_fixture() {
