@@ -16,8 +16,8 @@ All process-to-process traffic behind the translator is length-prefixed, validat
 energy-nexus-daemon main /run/user/1001/nexus/main ~/.local/state/nexus/main
 energy-translator main /run/user/1001/nexus/main ~/.local/state/nexus/main
 energy-nexus main 'Read.Codex'
-energy-nexus-meta main 'Configure.Polling.{ 5 }'
-energy-nexus-meta main 'Configure.Program.{ Flow { /home/li/.local/bin/flow } }'
+energy-nexus-meta main 'Configure.Polling.5'
+energy-nexus-meta main 'Configure.Program.{ Flow /home/li/.local/bin/flow }'
 energy-pace main
 ```
 
