@@ -547,7 +547,7 @@ fn send_reminder(
     let address = &recipient.0;
     let datom = format!(
         "Send.{{ {{ {:?} {} {:?} }} Soft.Notice.«Energy {:?} is {:?}.» }}",
-        address.aspect, address.topic, address.layer, provider, level
+        address.aspect, address.topic, address.model, provider, level
     );
     Command::new(program)
         .arg(datom)
@@ -607,7 +607,7 @@ printf '%s\n' "$1" > {}
         let recipient = signal_energy_nexus::Recipient(signal_energy_nexus::Address {
             aspect: signal_flow::Aspect::Mind,
             topic: "energyNexus".into(),
-            layer: signal_flow::Layer::Secondary,
+            model: signal_flow::Model::Sol,
         });
         assert!(send_reminder(
             program.to_str().unwrap(),
@@ -618,7 +618,7 @@ printf '%s\n' "$1" > {}
         let transcript = std::fs::read_to_string(log).unwrap();
         println!("flow-0.51 reminder fixture: {}", transcript.trim());
         assert!(transcript.contains(
-            "Send.{ { Mind energyNexus Secondary } Soft.Notice.«Energy Codex is Low.» }"
+            "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }"
         ));
     }
     #[test]

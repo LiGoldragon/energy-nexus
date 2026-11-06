@@ -314,8 +314,8 @@ dependencies = [
 
 [[package]]
 name = "flow-ethos"
-version = "0.41.1"
-source = "git+https://github.com/LiGoldragon/flow?rev=b92b9689190c62db4f4c66a2b39cafe356cec1e4#b92b9689190c62db4f4c66a2b39cafe356cec1e4"
+version = "0.52.0"
+source = "git+https://github.com/LiGoldragon/flow?rev=9644e01d703e4fb109401d96798b9cd8dc242350#9644e01d703e4fb109401d96798b9cd8dc242350"
 dependencies = [
  "datom-codec 0.32.2",
  "ethos-zero 17.0.0",
@@ -453,8 +453,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-energy-nexus"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=c20f401c25c0f58570298ddcdb4c0c2bbdb673d8#c20f401c25c0f58570298ddcdb4c0c2bbdb673d8"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=67c7ffdfa57e0914193a7969672c990c78d61d29#67c7ffdfa57e0914193a7969672c990c78d61d29"
 dependencies = [
  "datom-codec 0.32.2",
  "protos",
@@ -777,8 +777,8 @@ dependencies = [
 
 [[package]]
 name = "signal-energy-nexus"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=226ff14f28913258869f13819807111ce35713f5#226ff14f28913258869f13819807111ce35713f5"
+version = "0.3.0"
+source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=79b4f2c602845093f7a3c89f730a68e229ba6504#79b4f2c602845093f7a3c89f730a68e229ba6504"
 dependencies = [
  "datom-codec 0.32.2",
  "protos",
@@ -789,8 +789,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "39.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=74f4dae4bcf909e3ca16a64d2f4736a308223eb2#74f4dae4bcf909e3ca16a64d2f4736a308223eb2"
+version = "45.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=9abc0227c3323743826447ead18cb7697a45a9c7#9abc0227c3323743826447ead18cb7697a45a9c7"
 dependencies = [
  "datom-codec 0.32.2",
  "ethos-zero 17.0.0",

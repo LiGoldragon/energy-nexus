@@ -8,7 +8,7 @@ rust-version.workspace=true
 energy-nexus-emission={path="../emission"}
 energy-nexus-wire={path="../wire"}
 signal-energy-nexus={workspace=true,features=["datom"]}
-signal-flow={git="https://github.com/LiGoldragon/signal-flow",rev="74f4dae4bcf909e3ca16a64d2f4736a308223eb2",default-features=false}
+signal-flow={git="https://github.com/LiGoldragon/signal-flow",rev="9abc0227c3323743826447ead18cb7697a45a9c7",default-features=false}
 meta-signal-energy-nexus={workspace=true,features=["datom"]}
 signal.workspace=true
 datom-codec={git="https://github.com/LiGoldragon/datom-codec",rev="4dff16b4f7412febc3b71aac8b49680cd20988cb"}
