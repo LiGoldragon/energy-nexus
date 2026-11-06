@@ -1,6 +1,6 @@
 [package]
 name="energy-nexus-core"
-version="0.1.0"
+version = "0.2.0"
 edition.workspace=true
 rust-version.workspace=true
 
@@ -10,4 +10,4 @@ meta-signal-energy-nexus.workspace=true
 rkyv.workspace=true
 
 [dev-dependencies]
-ethos-zero={git="https://github.com/LiGoldragon/ethos-zero",rev="b8052c2404374265dfcddbde83fef76977f78acd",default-features=false}
+ethos-zero={git="https://github.com/LiGoldragon/ethos-zero",rev="5a5daca",default-features=false}

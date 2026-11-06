@@ -345,7 +345,7 @@ fn encode<T: datom_codec::Datomizable>(value: &T) -> String {
 fn budget() -> datom_codec::Budget {
     datom_codec::Budget {
         remaining: 100_000,
-        reader: protos::ReaderBudget { remaining: 100_000 },
+        reader: protos::ReaderBudget::try_from(100_000).expect("the reader budget is within range"),
         depth: 0,
         maximum_depth: 128,
     }
@@ -553,7 +553,7 @@ fn send_reminder(
     let address = &recipient.0;
     let datom = format!(
         "Send.{{ {{ {:?} {} {:?} }} Soft.Notice.«Energy {:?} is {:?}.» }}",
-        address.aspect, address.topic, address.layer, provider, level
+        address.aspect, address.topic, address.model, provider, level
     );
     Command::new(program)
         .arg(datom)
@@ -613,7 +613,7 @@ printf '%s\n' "$1" > {}
         let recipient = signal_energy_nexus::Recipient(signal_energy_nexus::Address {
             aspect: signal_flow::Aspect::Mind,
             topic: "energyNexus".into(),
-            layer: signal_flow::Layer::Secondary,
+            model: signal_flow::Model::Sol,
         });
         assert!(send_reminder(
             program.to_str().unwrap(),
@@ -624,7 +624,7 @@ printf '%s\n' "$1" > {}
         let transcript = std::fs::read_to_string(log).unwrap();
         println!("flow-0.51 reminder fixture: {}", transcript.trim());
         assert!(transcript.contains(
-            "Send.{ { Mind energyNexus Secondary } Soft.Notice.«Energy Codex is Low.» }"
+            "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }"
         ));
     }
     #[test]
@@ -672,6 +672,21 @@ sleep 60
         let query = meta_signal_energy_nexus::Query::Configure(
             meta_signal_energy_nexus::Set::Polling(Minutes(5)),
         );
-        assert_eq!(encode(&query), "Configure.Polling.{ 5 }");
+        assert_eq!(encode(&query), "Configure.Polling.5");
+    }
+    #[test]
+    fn meta_query_text_reads_the_bare_minutes_and_refuses_the_braced_form() {
+        use datom_codec::{Actualizing, Potential};
+        let read = |text: &str| {
+            Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
+        };
+        let bare = read("Configure.Polling.5").expect("the bare form reads");
+        assert_eq!(
+            bare,
+            meta_signal_energy_nexus::Query::Configure(meta_signal_energy_nexus::Set::Polling(
+                Minutes(5)
+            ))
+        );
+        assert!(read("Configure.Polling.{ 5 }").is_err());
     }
 }

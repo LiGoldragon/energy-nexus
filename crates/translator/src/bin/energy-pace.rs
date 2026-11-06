@@ -15,7 +15,7 @@ fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::
         .ok_or("no answer")?;
     let mut budget = datom_codec::Budget {
         remaining: 100_000,
-        reader: protos::ReaderBudget { remaining: 100_000 },
+        reader: protos::ReaderBudget::try_from(100_000).expect("the reader budget is within range"),
         depth: 0,
         maximum_depth: 128,
     };
