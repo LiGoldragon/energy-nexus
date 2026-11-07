@@ -61,23 +61,235 @@ pub struct Memory {
     history: Vec<Reading>,
     configuration: Configuration,
 }
-impl Memory {
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::default());
+/// The first eight bytes of a versioned memory file: the supported-format discriminator. It is
+/// not a proof that other bytes were never written under another format.
+const MEMORY_MAGIC: [u8; 8] = *b"ENXMEMRY";
+/// The format version this build writes and admits.
+const MEMORY_VERSION: u32 = 1;
+/// Magic, version, payload length.
+const MEMORY_HEADER: usize = 8 + 4 + 8;
+
+/// Why a memory file was not admitted or written. A refusal never changes the file and never
+/// stands in for an empty memory.
+#[derive(Debug)]
+pub enum MemoryRefusal {
+    /// The entry could not be read, or is not a regular file (a symlink, even a dangling one,
+    /// a directory or a device).
+    Read {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    /// The input is empty, shorter than its envelope, or its payload differs from the declared length.
+    Truncated {
+        path: std::path::PathBuf,
+        found: u64,
+    },
+    /// The bytes do not begin with the supported envelope. They may be a memory written before
+    /// versioning, or anything else; this build does not claim to know which.
+    Unrecognized {
+        path: std::path::PathBuf,
+        bytes: u64,
+    },
+    /// The envelope names a format version this build does not read.
+    UnsupportedVersion {
+        path: std::path::PathBuf,
+        found: u32,
+    },
+    /// The envelope is sound and the archive, or a rule of the configuration, is invalid.
+    Payload {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+    /// The memory could not be written.
+    Write {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+}
+impl std::fmt::Display for MemoryRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(formatter, "memory {} could not be read: {source}", path.display())
+            }
+            Self::Truncated { path, found } => write!(
+                formatter,
+                "memory {} is empty, truncated or longer than its envelope declares ({found} bytes)",
+                path.display()
+            ),
+            Self::Unrecognized { path, bytes } => write!(
+                formatter,
+                "memory {} ({bytes} bytes) does not begin with the supported envelope; it may have \
+                 been written before versioning. It is left untouched, never read as the current \
+                 format and never replaced by an empty memory; move it aside to start fresh, \
+                 carrying it forward needs an explicit mapping this build does not have",
+                path.display()
+            ),
+            Self::UnsupportedVersion { path, found } => write!(
+                formatter,
+                "memory {} has format version {found}; this build reads version {MEMORY_VERSION}",
+                path.display()
+            ),
+            Self::Payload { path, reason } => write!(
+                formatter,
+                "memory {} has a sound envelope and an invalid content: {reason}",
+                path.display()
+            ),
+            Self::Write { path, source } => {
+                write!(formatter, "memory {} could not be written: {source}", path.display())
+            }
         }
-        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes).map_err(|error| error.to_string())
     }
-    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+}
+impl std::error::Error for MemoryRefusal {}
+
+/// The outcome of admitting a memory path.
+#[derive(Debug)]
+pub enum Admission {
+    /// No entry exists: the only case that starts a fresh memory.
+    Absent,
+    /// An entry exists and passed the envelope, archive and configuration rules.
+    Admitted(Memory),
+}
+
+impl Configuration {
+    /// The rules `Memory::configure` enforces, applied to a loaded configuration.
+    fn validate(&self) -> Result<(), String> {
+        if self.polling.0 <= 0 || self.redeem_expiring.0 <= 0 {
+            return Err("minutes must be positive".into());
         }
-        let bytes =
-            rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())?;
+        if !(0..=100).contains(&self.redeem_used_at_least.0) {
+            return Err("percent must be between 0 and 100".into());
+        }
+        for threshold in &self.thresholds {
+            if threshold.level == Level::Out || !(0..=100).contains(&threshold.left.0) {
+                return Err(
+                    "Out follows provider allowance; threshold percent must be between 0 and 100"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Memory {
+    /// The one admission rule, used by `load` and before any overwrite by `save`.
+    /// Order: entry kind, bytes, envelope, archive, configuration rules.
+    pub fn admit(path: &std::path::Path) -> Result<Admission, MemoryRefusal> {
+        let read = |source| MemoryRefusal::Read {
+            path: path.to_owned(),
+            source,
+        };
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(read(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not a regular file",
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Admission::Absent);
+            }
+            Err(source) => return Err(read(source)),
+        }
+        let bytes = std::fs::read(path).map_err(read)?;
+        let truncated = |found: usize| MemoryRefusal::Truncated {
+            path: path.to_owned(),
+            found: found as u64,
+        };
+        let magic = MEMORY_MAGIC.len();
+        // Empty input, or a proper prefix of the magic, is truncated; any other input that does
+        // not begin with the magic is unrecognized.
+        if bytes.len() < magic && MEMORY_MAGIC.starts_with(&bytes) {
+            return Err(truncated(bytes.len()));
+        }
+        if bytes.len() < magic || bytes[..magic] != MEMORY_MAGIC {
+            return Err(MemoryRefusal::Unrecognized {
+                path: path.to_owned(),
+                bytes: bytes.len() as u64,
+            });
+        }
+        if bytes.len() < MEMORY_HEADER {
+            return Err(truncated(bytes.len()));
+        }
+        let version = u32::from_le_bytes(bytes[8..12].try_into().expect("four bytes"));
+        if version != MEMORY_VERSION {
+            return Err(MemoryRefusal::UnsupportedVersion {
+                path: path.to_owned(),
+                found: version,
+            });
+        }
+        let declared = u64::from_le_bytes(bytes[12..20].try_into().expect("eight bytes"));
+        let payload = &bytes[MEMORY_HEADER..];
+        if u64::try_from(payload.len()).map_or(true, |actual| actual != declared) {
+            return Err(truncated(bytes.len()));
+        }
+        let mut aligned = rkyv::util::AlignedVec::<16>::new();
+        aligned.extend_from_slice(payload);
+        let memory = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned).map_err(|error| {
+            MemoryRefusal::Payload {
+                path: path.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        memory
+            .configuration
+            .validate()
+            .map_err(|reason| MemoryRefusal::Payload {
+                path: path.to_owned(),
+                reason,
+            })?;
+        Ok(Admission::Admitted(memory))
+    }
+    /// A missing entry is the only fresh memory; every other outcome is an admitted memory or a
+    /// refusal that leaves the file unchanged.
+    pub fn load(path: &std::path::Path) -> Result<Self, MemoryRefusal> {
+        match Self::admit(path)? {
+            Admission::Absent => Ok(Self::default()),
+            Admission::Admitted(memory) => Ok(memory),
+        }
+    }
+    /// Writes the envelope and the archive. An existing entry is first admitted by the rule
+    /// `load` applies, so a file `load` refuses is never replaced by this function. Supported
+    /// contract: one cooperating writer; the target can change after admission, a failed or
+    /// interrupted write can leave `memory.new`, and the directory is not synced.
+    pub fn save(&self, path: &std::path::Path) -> Result<(), MemoryRefusal> {
+        let failure = |source| MemoryRefusal::Write {
+            path: path.to_owned(),
+            source,
+        };
+        Self::admit(path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(failure)?;
+        }
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| {
+            failure(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })?;
+        let mut bytes = Vec::with_capacity(MEMORY_HEADER + archive.len());
+        bytes.extend_from_slice(&MEMORY_MAGIC);
+        bytes.extend_from_slice(&MEMORY_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(archive.as_slice());
         let temporary = path.with_extension("new");
-        std::fs::write(&temporary, bytes.as_slice()).map_err(|error| error.to_string())?;
-        std::fs::rename(temporary, path).map_err(|error| error.to_string())
+        let written = (|| {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()
+        })();
+        if let Err(source) = written {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(failure(source));
+        }
+        std::fs::rename(&temporary, path).map_err(|source| {
+            let _ = std::fs::remove_file(&temporary);
+            failure(source)
+        })
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -456,5 +668,35 @@ mod tests {
             Target::SpendBy(Instant(170))
         );
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn configuration_rules_are_enforced_on_admission() {
+        let directory = std::env::temp_dir().join(format!("energy-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let path = directory.join("memory.rkyv");
+        for broken in 0..3 {
+            let mut memory = Memory::default();
+            match broken {
+                0 => memory.configuration.polling = Minutes(0),
+                1 => memory.configuration.redeem_used_at_least = Percent(101),
+                _ => memory.configuration.thresholds.push(Threshold {
+                    level: Level::Out,
+                    left: Percent(10),
+                }),
+            }
+            memory.save(&path).expect("save writes what it is given");
+            assert!(
+                matches!(Memory::load(&path), Err(MemoryRefusal::Payload { .. })),
+                "rule {broken}"
+            );
+            if broken < 2 {
+                std::fs::remove_file(&path).expect("clear the refused file");
+            }
+        }
+        assert!(
+            Memory::default().save(&path).is_err(),
+            "a file load refuses is not replaced"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

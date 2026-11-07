@@ -11,3 +11,6 @@ energy-nexus-wire={path="../wire"}
 signal-energy-nexus.workspace=true
 meta-signal-energy-nexus.workspace=true
 signal.workspace=true
+
+[dev-dependencies]
+signal-flow={git="https://github.com/LiGoldragon/signal-flow",rev="9f159d91f5ed08b161fe99da7f964434e4e584d5",default-features=false}
