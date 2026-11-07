@@ -154,10 +154,16 @@ impl Answering for Nexus {
     }
     fn read(&mut self, provider: Provider) -> Response {
         if let Some(reason) = &self.halted {
-            // Halted: no provider call and no mutation. The committed snapshot and the halt
-            // cause are conveyed in the typed refusal, the wire having no status field.
+            // Halted: no provider call and no mutation. The committed reading, its level and its
+            // pace, and the halt cause, are carried as text in the typed refusal, the wire having
+            // no status field and Read_Data no room for a cause.
             let snapshot = match self.memory.latest(&provider) {
-                Some(latest) => format!("level {:?} read at {}", latest.level, latest.reading.at.0),
+                Some(latest) => format!(
+                    "level {:?}, reading {:?}, pace {:?}",
+                    latest.level,
+                    latest.reading,
+                    latest.reading.pace(self.memory.configuration())
+                ),
                 None => "none".to_owned(),
             };
             return Response::Refused(Refused::RuleRefused(format!(
@@ -456,6 +462,10 @@ mod tests {
             Response::Refused(Refused::RuleRefused(text)) => {
                 assert!(text.starts_with("halted: memory not persisted"), "{text}");
                 assert!(text.contains("committed snapshot: level"), "{text}");
+                assert!(
+                    text.contains("window_vector") && text.contains("pace"),
+                    "{text}"
+                );
             }
             other => panic!("a halted read reports the cause and the snapshot, got {other:?}"),
         }

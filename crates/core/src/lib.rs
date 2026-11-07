@@ -260,6 +260,14 @@ impl Memory {
             path: path.to_owned(),
             source,
         };
+        // The candidate is validated by the rules `admit` applies, before any directory,
+        // temporary file or read of the existing file, so an invalid candidate is never written.
+        self.configuration
+            .validate()
+            .map_err(|reason| MemoryRefusal::Payload {
+                path: path.to_owned(),
+                reason,
+            })?;
         Self::admit(path)?;
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| {
             failure(std::io::Error::new(
@@ -666,11 +674,23 @@ mod tests {
         );
         std::fs::remove_file(path).unwrap();
     }
+    /// The current envelope around a Memory, built without `save`, so an invalid configuration
+    /// can be placed on disk to prove admission refuses it.
+    fn envelope(memory: &Memory) -> Vec<u8> {
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(memory).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MEMORY_MAGIC);
+        bytes.extend_from_slice(&MEMORY_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(archive.as_slice());
+        bytes
+    }
+
     #[test]
-    fn configuration_rules_are_enforced_on_admission() {
+    fn configuration_rules_are_enforced_on_admission_and_before_any_write() {
         let directory = std::env::temp_dir().join(format!("energy-rules-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
-        let path = directory.join("memory.rkyv");
+        std::fs::create_dir_all(&directory).unwrap();
         for broken in 0..3 {
             let mut memory = Memory::default();
             match broken {
@@ -681,19 +701,34 @@ mod tests {
                     left: Percent(10),
                 }),
             }
-            memory.save(&path).expect("save writes what it is given");
+            // admission of a file holding the invalid configuration, built by test encoding
+            let path = directory.join(format!("memory-{broken}.rkyv"));
+            std::fs::write(&path, envelope(&memory)).unwrap();
+            let before = std::fs::read(&path).unwrap();
             assert!(
                 matches!(Memory::load(&path), Err(MemoryRefusal::Payload { .. })),
                 "rule {broken}"
             );
-            if broken < 2 {
-                std::fs::remove_file(&path).expect("clear the refused file");
-            }
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            // save of the invalid candidate: refused before any directory or temporary file
+            let fresh = directory
+                .join(format!("never-{broken}"))
+                .join("memory.rkyv");
+            assert!(matches!(
+                memory.save(&fresh),
+                Err(MemoryRefusal::Payload { .. })
+            ));
+            assert!(
+                !fresh.parent().unwrap().exists(),
+                "no parent directory was created"
+            );
+            assert!(!path.with_extension("new").exists(), "no temporary file");
+            assert!(
+                matches!(memory.save(&path), Err(MemoryRefusal::Payload { .. })),
+                "an invalid candidate over a refused file is refused too"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
         }
-        assert!(
-            Memory::default().save(&path).is_err(),
-            "a file load refuses is not replaced"
-        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 }
