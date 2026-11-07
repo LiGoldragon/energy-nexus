@@ -15,3 +15,4 @@ signal.workspace=true
 [dev-dependencies]
 nix={version="0.30",features=["signal"]}
 tempfile="3"
+signal-flow={git="https://github.com/LiGoldragon/signal-flow",rev="065730ff8b628657a692e8890714cadde881f1d4",default-features=false}

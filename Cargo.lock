@@ -159,6 +159,7 @@ dependencies = [
  "nix",
  "signal",
  "signal-energy-nexus",
+ "signal-flow",
  "tempfile",
 ]
 
