@@ -159,3 +159,57 @@ fn a_translator_whose_place_is_absent_does_not_start_or_make_it() {
     assert!(!Running::started(child).exit().success());
     assert!(!place.runtime.exists());
 }
+
+/// The translator memory energy-nexus e5722529, the proof of concept,
+/// wrote: its three configured paths, a bare rkyv archive (provenance in
+/// crates/core/tests/old_archive_provenance.md).
+const PROOF_OF_CONCEPT_MEMORY: &[u8] =
+    include_bytes!("fixtures/energy-translator-e5722529.rkyv");
+
+#[test]
+fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured() {
+    use energy_nexus_translator::Programs;
+    use energy_nexus_wire::{Admission, Framing, MemoryPathing, Persisted};
+    let shared = SharedPlace::declared();
+    // activation-places.md step 3: translator.rkyv moved to <State>/energy-translator.rkyv
+    let path = shared.place.translator_memory();
+    std::fs::write(&path, PROOF_OF_CONCEPT_MEMORY).unwrap();
+    let running = shared.start();
+    let read = || match Programs::load(&path).unwrap() {
+        Admission::Admitted(programs) => programs,
+        other => panic!("the translator memory is current, got {other:?}"),
+    };
+    assert_eq!(&std::fs::read(&path).unwrap()[..8], b"ENXTRNSL");
+    assert_eq!(
+        read(),
+        Programs {
+            codex: Some(
+                "/nix/store/1q41fx3vb1hqzdgkr0nk5b0pc4jvyhl1-codex-0.166.0/bin/codex".into()
+            ),
+            flow: Some("/home/li/.local/bin/flow-0.51".into()),
+            credentials: Some("/home/li/.claude/.credentials.json".into()),
+        }
+    );
+    // activation-places.md step 6, as energy-nexus-meta sends it
+    use datom_codec::Datomizable;
+    use protos::{Protosizable, Textualizable};
+    let set = meta_signal_energy_nexus::Set::Program(meta_signal_energy_nexus::ProgramPath {
+        program: meta_signal_energy_nexus::Program::Flow,
+        path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow".into()),
+    });
+    let text = meta_signal_energy_nexus::Query::Configure(set.clone())
+        .datomize(Vec::new())
+        .protosize()
+        .textualize();
+    println!("step 6 text: {text}");
+    let mut meta = UnixStream::connect(shared.place.meta_translator()).unwrap();
+    meta.write_frame(text.as_bytes()).unwrap();
+    let answer = String::from_utf8(meta.read_frame().unwrap()).unwrap();
+    let configured = meta_signal_energy_nexus::Response::Configured(set)
+        .datomize(Vec::new())
+        .protosize()
+        .textualize();
+    assert_eq!(answer, configured);
+    assert_eq!(read().flow.as_deref(), Some("/home/li/.local/bin/flow"));
+    assert!(running.stop().success());
+}

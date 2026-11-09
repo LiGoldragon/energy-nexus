@@ -5,7 +5,7 @@ fn main() {
     let name = args.next().expect("usage: energy-nexus PLACE DATOM");
     let text = args.next().expect("datom");
     let follow = text == "Subscribe";
-    let client = Translator::open(Place::resolve(PlaceName(name)).expect("resolve place"));
+    let client = Translator::client(Place::resolve(PlaceName(name)).expect("resolve place"));
     for answer in client.request(&text, false, follow).expect("request") {
         println!("{answer}");
     }

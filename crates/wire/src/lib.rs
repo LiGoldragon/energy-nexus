@@ -1,4 +1,6 @@
 use std::io::{Read, Write};
+mod memory;
+pub use memory::{Admission, Envelope, MemoryRefusal, Persisted, Upgrade};
 pub const CAPACITY: usize = 4 * 1024 * 1024;
 pub trait Framing {
     fn read_frame(&mut self) -> std::io::Result<Vec<u8>>;

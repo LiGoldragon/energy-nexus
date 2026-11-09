@@ -1,14 +1,14 @@
 use energy_nexus_core::{
-    Configuring, LevelChange, Levelling, Memory, MemoryRefusal, Pacing, RedeemDecision, Redeeming,
-    Remembering, Reminding,
+    Configuring, LevelChange, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering,
+    Reminding,
 };
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
     Outcome as ExternalOutcome, Query as EmissionQuery, Response as EmissionResponse, Send,
 };
 use energy_nexus_wire::{
-    AnnouncesReadiness, Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place,
-    Readiness, SocketPathing,
+    AnnouncesReadiness, Declared, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
+    OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{Call, Changed_Data, Provider, Query, Read_Data, Refused, Response};
@@ -19,7 +19,6 @@ struct Nexus {
     memory: Memory,
     subscribers: Vec<UnixStream>,
     place: Place,
-    halted: Option<String>,
 }
 enum Operation {
     Reading(Provider),
@@ -56,25 +55,15 @@ impl Emitting for Nexus {
     }
 }
 impl Nexus {
-    /// Saves the candidate memory and only then makes it the memory in use, so the memory in RAM
-    /// never changes ahead of the file.
+    /// Saves the candidate memory and only then makes it the memory in use:
+    /// the memory in use never runs ahead of the file, and a failed save
+    /// leaves both as they were.
     fn commit(&mut self, candidate: Memory) -> Result<(), MemoryRefusal> {
         candidate.save(&self.place.memory())?;
         self.memory = candidate;
         Ok(())
     }
-    /// After a failed save the Nexus stops every mutation, provider and reminder entry; the
-    /// memory in RAM is unchanged and nothing is rolled back.
-    fn halt(&mut self, refusal: &MemoryRefusal) -> String {
-        let reason = format!("memory not persisted: {refusal}");
-        eprintln!("energy-nexus: halted, {reason}");
-        self.halted = Some(reason.clone());
-        reason
-    }
     fn attempt(&mut self, operation: Operation) -> OperationOutcome {
-        if let Some(reason) = &self.halted {
-            return OperationOutcome::Failed(Refused::RuleRefused(format!("halted: {reason}")));
-        }
         match operation {
             Operation::Reading(provider) => {
                 let emission = match provider {
@@ -91,10 +80,9 @@ impl Nexus {
                 let change = candidate.remember(reading);
                 match self.commit(candidate) {
                     Ok(()) => OperationOutcome::Levelled(change),
-                    Err(refusal) => {
-                        let reason = self.halt(&refusal);
-                        OperationOutcome::Failed(Refused::RuleRefused(reason))
-                    }
+                    Err(refusal) => OperationOutcome::Failed(Refused::RuleRefused(format!(
+                        "memory not persisted: {refusal}"
+                    ))),
                 }
             }
             Operation::Reminding(reminder, reading) => {
@@ -153,23 +141,6 @@ impl Answering for Nexus {
         }
     }
     fn read(&mut self, provider: Provider) -> Response {
-        if let Some(reason) = &self.halted {
-            // Halted: no provider call and no mutation. The committed reading, its level and its
-            // pace, and the halt cause, are carried as text in the typed refusal, the wire having
-            // no status field and Read_Data no room for a cause.
-            let snapshot = match self.memory.latest(&provider) {
-                Some(latest) => format!(
-                    "level {:?}, reading {:?}, pace {:?}",
-                    latest.level,
-                    latest.reading,
-                    latest.reading.pace(self.memory.configuration())
-                ),
-                None => "none".to_owned(),
-            };
-            return Response::Refused(Refused::RuleRefused(format!(
-                "halted: {reason}; committed snapshot: {snapshot}"
-            )));
-        }
         match self.attempt(Operation::Reading(provider.clone())) {
             OperationOutcome::Read(reading) => {
                 let levelled = self.attempt(Operation::Levelling(reading.clone()));
@@ -220,10 +191,28 @@ trait Serving {
 impl Serving for Place {
     fn serve(self) -> std::io::Result<()> {
         self.confirm()?;
-        // Admission next: a refused memory means no socket or thread is created.
-        let memory = Memory::load(&self.memory()).map_err(|refusal| {
+        // Memory next: a refused memory means no socket or thread is made.
+        let path = self.memory();
+        let admission = Memory::load(&path).map_err(|refusal| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, refusal.to_string())
         })?;
+        let upgraded = matches!(admission, energy_nexus_wire::Admission::Upgraded(_));
+        let Upgrade { memory, uncarried } = Upgrade::from(admission);
+        if upgraded {
+            eprintln!(
+                "energy-nexus: {} upgraded from the archive written before the envelope",
+                path.display()
+            );
+        }
+        for reminder in &uncarried {
+            let address = &reminder.recipient.0;
+            eprintln!(
+                "energy-nexus: reminder not carried, its recipient names a layer and Flow \
+                 addresses a model: {reminder}; configure it again with the model that serves \
+                 it: energy-nexus-meta {} 'Configure.Reminder.{{ {:?} {:?} {{ {:?} {} <Model> }} }}'",
+                self.name.0, reminder.provider, reminder.level, address.aspect, address.topic
+            );
+        }
         let own = OwnedSockets(vec![self.public(), self.meta()]);
         own.remove_at_stop()?;
         own.remove();
@@ -233,7 +222,6 @@ impl Serving for Place {
             memory,
             subscribers: Vec::new(),
             place: self.clone(),
-            halted: None,
         }));
         // Both sockets listen and Memory is loaded: a unit ordered after
         // this one (the translator) finds the daemon serving.
@@ -243,13 +231,6 @@ impl Serving for Place {
         {
             let nexus = Arc::clone(&nexus);
             std::thread::spawn(move || loop {
-                if nexus
-                    .lock()
-                    .map(|guard| guard.halted.is_some())
-                    .unwrap_or(true)
-                {
-                    break;
-                }
                 let minutes = nexus
                     .lock()
                     .ok()
@@ -310,19 +291,15 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
     let meta_signal_energy_nexus::Query::Configure(set) = call.input;
     let response = match nexus.lock() {
         Ok(mut n) => {
-            if let Some(reason) = n.halted.clone() {
-                meta_signal_energy_nexus::Response::ConfigureRefused(format!("halted: {reason}"))
-            } else {
-                let mut candidate = n.memory.clone();
-                match candidate.configure(set) {
-                    Ok(applied) => match n.commit(candidate) {
-                        Ok(()) => meta_signal_energy_nexus::Response::Configured(applied),
-                        Err(refusal) => {
-                            meta_signal_energy_nexus::Response::ConfigureRefused(n.halt(&refusal))
-                        }
-                    },
-                    Err(reason) => meta_signal_energy_nexus::Response::ConfigureRefused(reason),
-                }
+            let mut candidate = n.memory.clone();
+            match candidate.configure(set) {
+                Ok(applied) => match n.commit(candidate) {
+                    Ok(()) => meta_signal_energy_nexus::Response::Configured(applied),
+                    Err(refusal) => meta_signal_energy_nexus::Response::ConfigureRefused(format!(
+                        "memory not persisted: {refusal}"
+                    )),
+                },
+                Err(reason) => meta_signal_energy_nexus::Response::ConfigureRefused(reason),
             }
         }
         Err(_) => meta_signal_energy_nexus::Response::ConfigureRefused("memory unavailable".into()),
@@ -355,7 +332,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use energy_nexus_core::Levelling;
+    use energy_nexus_wire::Admission;
     use signal_energy_nexus::{Instant, Minutes, Name, Percent, Reading, Window};
 
     fn nexus(root: &std::path::Path) -> Nexus {
@@ -368,17 +345,16 @@ mod tests {
                 runtime: root.join("run"),
                 state: root.to_owned(),
             },
-            halted: None,
         }
     }
 
-    fn reading() -> Reading {
+    fn reading(used: i64) -> Reading {
         Reading {
             provider: Provider::Codex,
             allowed: true,
             window_vector: vec![Window {
                 name: Name::Week,
-                used: Percent(10),
+                used: Percent(used),
                 resets: Instant(1_000),
                 duration: Minutes(10_080),
             }],
@@ -387,99 +363,45 @@ mod tests {
         }
     }
 
+    fn used(memory: &Memory) -> Percent {
+        memory.latest(&Provider::Codex).unwrap().reading.window_vector[0]
+            .used
+            .clone()
+    }
+
+    fn on_disk(root: &std::path::Path) -> Memory {
+        match Memory::load(&root.join("energy.rkyv")).unwrap() {
+            Admission::Admitted(memory) => memory,
+            other => panic!("the committed file is current, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_failed_save_leaves_the_memory_halts_the_nexus_and_refuses_further_work() {
-        let root = std::env::temp_dir().join(format!("energy-halt-{}", std::process::id()));
+    fn a_failed_save_leaves_the_memory_and_the_file_and_answers_the_failure() {
+        let root = std::env::temp_dir().join(format!("energy-commit-fail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut nexus = nexus(&root);
-        // a committed snapshot first
         assert!(matches!(
-            nexus.attempt(Operation::Levelling(reading())),
+            nexus.attempt(Operation::Levelling(reading(10))),
             OperationOutcome::Levelled(_)
         ));
         let committed = std::fs::read(root.join("energy.rkyv")).unwrap();
-        let before = nexus.memory.clone();
         // the temporary name is taken by a directory: the next save fails
         std::fs::create_dir(root.join("energy.new")).unwrap();
-        let mut worse = reading();
-        worse.window_vector[0].used = Percent(95);
-        let outcome = nexus.attempt(Operation::Levelling(worse));
+        let outcome = nexus.attempt(Operation::Levelling(reading(95)));
         assert!(
-            matches!(&outcome, OperationOutcome::Failed(Refused::RuleRefused(reason)) if reason.contains("memory not persisted")),
+            matches!(&outcome, OperationOutcome::Failed(Refused::RuleRefused(reason)) if reason.starts_with("memory not persisted")),
         );
-        assert!(nexus.halted.is_some());
-        assert_eq!(nexus.memory.configuration(), before.configuration());
-        assert_eq!(
-            nexus
-                .memory
-                .latest(&Provider::Codex)
-                .unwrap()
-                .reading
-                .window_vector[0]
-                .used,
-            Percent(10),
-            "the committed snapshot is kept, the failed one never swapped in"
-        );
-        assert_eq!(
-            std::fs::read(root.join("energy.rkyv")).unwrap(),
-            committed,
-            "the committed file is untouched"
-        );
-        for _ in 0..2 {
-            let again = nexus.attempt(Operation::Levelling(reading()));
-            assert!(
-                matches!(&again, OperationOutcome::Failed(Refused::RuleRefused(reason)) if reason.starts_with("halted:")),
-                "repeated refusals"
-            );
-            let read = nexus.attempt(Operation::Reading(Provider::Codex));
-            assert!(
-                matches!(&read, OperationOutcome::Failed(Refused::RuleRefused(reason)) if reason.starts_with("halted:")),
-                "no provider call is attempted once halted"
-            );
-            let reminding = nexus.attempt(Operation::Reminding(
-                signal_energy_nexus::Reminder {
-                    provider: Provider::Codex,
-                    level: signal_energy_nexus::Level::Low,
-                    recipient: signal_energy_nexus::Recipient(signal_energy_nexus::Address {
-                        aspect: signal_flow::Aspect::Mind,
-                        topic: "energyNexus".into(),
-                        model: signal_flow::Model::Sol,
-                    }),
-                },
-                reading(),
-            ));
-            assert!(matches!(
-                reminding,
-                OperationOutcome::Failed(Refused::RuleRefused(_))
-            ));
-            let redeeming = nexus.attempt(Operation::Redeeming(Provider::Codex));
-            assert!(matches!(
-                redeeming,
-                OperationOutcome::Failed(Refused::RuleRefused(_))
-            ));
-        }
-        match nexus.read(Provider::Codex) {
-            Response::Refused(Refused::RuleRefused(text)) => {
-                assert!(text.starts_with("halted: memory not persisted"), "{text}");
-                assert!(text.contains("committed snapshot: level"), "{text}");
-                assert!(
-                    text.contains("window_vector") && text.contains("pace"),
-                    "{text}"
-                );
-            }
-            other => panic!("a halted read reports the cause and the snapshot, got {other:?}"),
-        }
-        // restart: the full admission of the untouched file reads the committed snapshot
-        let restarted = Memory::load(&root.join("energy.rkyv")).unwrap();
-        assert_eq!(
-            restarted
-                .latest(&Provider::Codex)
-                .unwrap()
-                .reading
-                .window_vector[0]
-                .used,
-            Percent(10)
-        );
+        assert_eq!(used(&nexus.memory), Percent(10), "the memory in use is the committed one");
+        assert_eq!(std::fs::read(root.join("energy.rkyv")).unwrap(), committed);
+        // the next attempt is answered on its own: once the save succeeds, it commits
+        std::fs::remove_dir(root.join("energy.new")).unwrap();
+        assert!(matches!(
+            nexus.attempt(Operation::Levelling(reading(95))),
+            OperationOutcome::Levelled(_)
+        ));
+        assert_eq!(used(&nexus.memory), Percent(95));
+        assert_eq!(used(&on_disk(&root)), Percent(95));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -488,11 +410,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("energy-commit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut nexus = nexus(&root);
-        let outcome = nexus.attempt(Operation::Levelling(reading()));
+        let outcome = nexus.attempt(Operation::Levelling(reading(10)));
         assert!(matches!(outcome, OperationOutcome::Levelled(_)));
-        assert!(nexus.halted.is_none());
-        let reloaded = Memory::load(&root.join("energy.rkyv")).unwrap();
-        assert_eq!(reloaded.configuration(), nexus.memory.configuration());
+        assert_eq!(on_disk(&root).configuration(), nexus.memory.configuration());
+        assert_eq!(used(&on_disk(&root)), Percent(10));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

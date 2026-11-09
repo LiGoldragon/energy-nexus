@@ -7,6 +7,7 @@ rust-version.workspace=true
 [dependencies]
 signal-energy-nexus.workspace=true
 meta-signal-energy-nexus.workspace=true
+energy-nexus-wire={path="../wire"}
 rkyv.workspace=true
 
 [dev-dependencies]

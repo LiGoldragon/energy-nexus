@@ -18,6 +18,7 @@ fn main() {
         runtime,
         state,
     })
+    .expect("open the translator's memory")
     .serve()
     .expect("serve translator")
 }

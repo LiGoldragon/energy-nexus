@@ -4,8 +4,8 @@ use energy_nexus_emission::{
     Query as EmissionQuery, Response as EmissionResponse, Send,
 };
 use energy_nexus_wire::{
-    AnnouncesReadiness, Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place,
-    Readiness, SocketPathing,
+    AnnouncesReadiness, Declared, Envelope, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
+    OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
 };
 use serde_json::{json, Value};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
@@ -17,11 +17,35 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Programs {
     pub codex: Option<String>,
     pub flow: Option<String>,
     pub credentials: Option<String>,
+}
+/// The translator's memory, `energy-translator.rkyv`, under its envelope.
+/// Before the envelope it was the same archive, bare; it is upgraded whole.
+impl Persisted for Programs {
+    const ENVELOPE: Envelope = Envelope {
+        magic: *b"ENXTRNSL",
+        version: 1,
+    };
+    type Uncarried = std::convert::Infallible;
+    fn from_archive(archive: &[u8]) -> Result<Self, String> {
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
+    }
+    fn upgrade(archive: &[u8]) -> Result<Upgrade<Self>, String> {
+        Self::from_archive(archive).map(|memory| Upgrade {
+            memory,
+            uncarried: Vec::new(),
+        })
+    }
+    fn to_archive(&self) -> Result<rkyv::util::AlignedVec, String> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())
+    }
+    fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Translator {
@@ -179,56 +203,57 @@ impl Emittable<Translator> for Send {
     }
 }
 impl Translator {
-    pub fn open(place: Place) -> Self {
-        let programs = std::fs::read(place.translator_memory())
-            .ok()
-            .and_then(|bytes| rkyv::from_bytes::<Programs, rkyv::rancor::Error>(&bytes).ok())
-            .unwrap_or_default();
+    /// The translator process at its place, with its memory: an archive
+    /// written before the envelope is upgraded on open, and a memory that
+    /// cannot be read keeps the translator from starting.
+    pub fn open(place: Place) -> Result<Self, MemoryRefusal> {
+        let path = place.translator_memory();
+        let admission = Programs::load(&path)?;
+        if matches!(admission, energy_nexus_wire::Admission::Upgraded(_)) {
+            eprintln!(
+                "energy-translator: {} upgraded from the archive written before the envelope",
+                path.display()
+            );
+        }
+        Ok(Self {
+            place,
+            programs: Arc::new(Mutex::new(Upgrade::from(admission).memory)),
+        })
+    }
+    /// A text client of the place: it reaches the translator's sockets and
+    /// reads no memory.
+    pub fn client(place: Place) -> Self {
         Self {
             place,
-            programs: Arc::new(Mutex::new(programs)),
+            programs: Arc::new(Mutex::new(Programs::default())),
         }
     }
+    /// A translator setting is saved and only then made the one in use.
     fn configure(&self, set: &meta_signal_energy_nexus::Set) -> Result<bool, String> {
-        let changed = match set {
-            meta_signal_energy_nexus::Set::Program(value) => {
-                let mut programs = self
-                    .programs
-                    .lock()
-                    .map_err(|_| "translator memory unavailable")?;
-                match value.program {
-                    meta_signal_energy_nexus::Program::Codex => {
-                        programs.codex = Some(value.path.0.clone())
-                    }
-                    meta_signal_energy_nexus::Program::Flow => {
-                        programs.flow = Some(value.path.0.clone())
-                    }
+        let mut programs = self
+            .programs
+            .lock()
+            .map_err(|_| "translator memory unavailable")?;
+        let mut candidate = programs.clone();
+        match set {
+            meta_signal_energy_nexus::Set::Program(value) => match value.program {
+                meta_signal_energy_nexus::Program::Codex => {
+                    candidate.codex = Some(value.path.0.clone())
                 }
-                true
-            }
+                meta_signal_energy_nexus::Program::Flow => {
+                    candidate.flow = Some(value.path.0.clone())
+                }
+            },
             meta_signal_energy_nexus::Set::Credentials(value) => {
-                self.programs
-                    .lock()
-                    .map_err(|_| "translator memory unavailable")?
-                    .credentials = Some(value.0.clone());
-                true
+                candidate.credentials = Some(value.0.clone())
             }
-            _ => false,
-        };
-        if changed {
-            let programs = self
-                .programs
-                .lock()
-                .map_err(|_| "translator memory unavailable")?;
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&*programs)
-                .map_err(|error| error.to_string())?;
-            let memory = self.place.translator_memory();
-            let temporary = memory.with_extension("new");
-            std::fs::write(&temporary, bytes.as_slice()).map_err(|error| error.to_string())?;
-            std::fs::rename(temporary, memory)
-                .map_err(|error| error.to_string())?;
+            _ => return Ok(false),
         }
-        Ok(changed)
+        candidate
+            .save(&self.place.translator_memory())
+            .map_err(|refusal| format!("memory not persisted: {refusal}"))?;
+        *programs = candidate;
+        Ok(true)
     }
     fn serve_emission(&self, mut stream: UnixStream) {
         let Ok(bytes) = stream.read_frame() else {
@@ -704,5 +729,54 @@ sleep 60
             ))
         );
         assert!(read("Configure.Polling.{ 5 }").is_err());
+    }
+    fn reminder_query() -> meta_signal_energy_nexus::Query {
+        meta_signal_energy_nexus::Query::Configure(
+            meta_signal_energy_nexus::Set::Reminder(signal_energy_nexus::Reminder {
+                provider: Provider::Codex,
+                level: Level::Low,
+                recipient: signal_energy_nexus::Recipient(signal_energy_nexus::Address {
+                    aspect: signal_flow::Aspect::Mind,
+                    topic: "energyNexus".into(),
+                    model: signal_flow::Model::Sol,
+                }),
+            }),
+        )
+    }
+    fn program_query() -> meta_signal_energy_nexus::Query {
+        meta_signal_energy_nexus::Query::Configure(meta_signal_energy_nexus::Set::Program(
+            meta_signal_energy_nexus::ProgramPath {
+                program: meta_signal_energy_nexus::Program::Flow,
+                path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow".into()),
+            },
+        ))
+    }
+    #[test]
+    fn meta_query_text_of_a_reminder_and_a_program() {
+        use datom_codec::{Actualizing, Potential};
+        for query in [reminder_query(), program_query()] {
+            let text = encode(&query);
+            println!("meta text: {text}");
+            let read = Potential::<meta_signal_energy_nexus::Query>::from(text.as_str())
+                .actualize(&mut budget())
+                .expect("the printed form reads");
+            assert_eq!(read, query);
+        }
+        // The one-line forms a person types at energy-nexus-meta.
+        let typed = |text: &str| {
+            Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
+        };
+        assert_eq!(
+            typed("Configure.Reminder.{ Codex Low { Mind energyNexus Sol } }").unwrap(),
+            reminder_query()
+        );
+        assert_eq!(
+            typed("Configure.Program.{ Flow /home/li/.local/bin/flow }").unwrap(),
+            program_query()
+        );
+        assert!(
+            typed("Configure.Program.{ Flow { /home/li/.local/bin/flow } }").is_err(),
+            "the braced path of protos 0.32 no longer reads"
+        );
     }
 }

@@ -68,7 +68,7 @@ fn main() {
         Some(_) => panic!("provider is Claude or Codex"),
         None => vec![Provider::Claude, Provider::Codex],
     };
-    let client = Translator::open(Place::resolve(PlaceName(name)).expect("resolve place"));
+    let client = Translator::client(Place::resolve(PlaceName(name)).expect("resolve place"));
     for provider in providers {
         show(read(&client, provider).expect("read energy pace"));
     }

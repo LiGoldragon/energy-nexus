@@ -1,3 +1,4 @@
+use energy_nexus_wire::{Envelope, Persisted, Upgrade};
 use meta_signal_energy_nexus::{ProviderTarget, Set, WindowTarget};
 use signal_energy_nexus::{
     Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus, Standing,
@@ -61,99 +62,9 @@ pub struct Memory {
     history: Vec<Reading>,
     configuration: Configuration,
 }
-/// The first eight bytes of a versioned memory file: the supported-format discriminator. It is
-/// not a proof that other bytes were never written under another format.
-const MEMORY_MAGIC: [u8; 8] = *b"ENXMEMRY";
-/// The format version this build writes and admits.
-const MEMORY_VERSION: u32 = 1;
-/// Magic, version, payload length.
-const MEMORY_HEADER: usize = 8 + 4 + 8;
-
-/// Why a memory file was not admitted or written. A refusal never changes the file and never
-/// stands in for an empty memory.
-#[derive(Debug)]
-pub enum MemoryRefusal {
-    /// The entry could not be read, or is not a regular file (a symlink, even a dangling one,
-    /// a directory or a device).
-    Read {
-        path: std::path::PathBuf,
-        source: std::io::Error,
-    },
-    /// The input is empty, shorter than its envelope, or its payload differs from the declared length.
-    Truncated {
-        path: std::path::PathBuf,
-        found: u64,
-    },
-    /// The bytes do not begin with the supported envelope. They may be a memory written before
-    /// versioning, or anything else; this build does not claim to know which.
-    Unrecognized {
-        path: std::path::PathBuf,
-        bytes: u64,
-    },
-    /// The envelope names a format version this build does not read.
-    UnsupportedVersion {
-        path: std::path::PathBuf,
-        found: u32,
-    },
-    /// The envelope is sound and the archive, or a rule of the configuration, is invalid.
-    Payload {
-        path: std::path::PathBuf,
-        reason: String,
-    },
-    /// The memory could not be written.
-    Write {
-        path: std::path::PathBuf,
-        source: std::io::Error,
-    },
-}
-impl std::fmt::Display for MemoryRefusal {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(formatter, "memory {} could not be read: {source}", path.display())
-            }
-            Self::Truncated { path, found } => write!(
-                formatter,
-                "memory {} is empty, truncated or longer than its envelope declares ({found} bytes)",
-                path.display()
-            ),
-            Self::Unrecognized { path, bytes } => write!(
-                formatter,
-                "memory {} ({bytes} bytes) does not begin with the supported envelope; it may have \
-                 been written before versioning. It is left untouched, never read as the current \
-                 format and never replaced by an empty memory; move it aside to start fresh, \
-                 carrying it forward needs an explicit mapping this build does not have",
-                path.display()
-            ),
-            Self::UnsupportedVersion { path, found } => write!(
-                formatter,
-                "memory {} has format version {found}; this build reads version {MEMORY_VERSION}",
-                path.display()
-            ),
-            Self::Payload { path, reason } => write!(
-                formatter,
-                "memory {} has a sound envelope and an invalid content: {reason}",
-                path.display()
-            ),
-            Self::Write { path, source } => {
-                write!(formatter, "memory {} could not be written: {source}", path.display())
-            }
-        }
-    }
-}
-impl std::error::Error for MemoryRefusal {}
-
-/// The outcome of admitting a memory path.
-#[derive(Debug)]
-pub enum Admission {
-    /// No entry exists: the only case that starts a fresh memory.
-    Absent,
-    /// An entry exists and passed the envelope, archive and configuration rules.
-    Admitted(Memory),
-}
-
 impl Configuration {
-    /// The rules `Memory::configure` enforces, applied to a loaded configuration.
+    /// The rules `Memory::configure` enforces, kept by every memory read or
+    /// written.
     fn validate(&self) -> Result<(), String> {
         if self.polling.0 <= 0 || self.redeem_expiring.0 <= 0 {
             return Err("minutes must be positive".into());
@@ -173,128 +84,117 @@ impl Configuration {
     }
 }
 
-impl Memory {
-    /// The one admission rule, used by `load` and before any overwrite by `save`.
-    /// Order: entry kind, bytes, envelope, archive, configuration rules.
-    pub fn admit(path: &std::path::Path) -> Result<Admission, MemoryRefusal> {
-        let read = |source| MemoryRefusal::Read {
-            path: path.to_owned(),
-            source,
-        };
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_file() => {}
-            Ok(_) => {
-                return Err(read(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "not a regular file",
-                )))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Admission::Absent);
-            }
-            Err(source) => return Err(read(source)),
-        }
-        let bytes = std::fs::read(path).map_err(read)?;
-        let truncated = |found: usize| MemoryRefusal::Truncated {
-            path: path.to_owned(),
-            found: found as u64,
-        };
-        let magic = MEMORY_MAGIC.len();
-        // Empty input, or a proper prefix of the magic, is truncated; any other input that does
-        // not begin with the magic is unrecognized.
-        if bytes.len() < magic && MEMORY_MAGIC.starts_with(&bytes) {
-            return Err(truncated(bytes.len()));
-        }
-        if bytes.len() < magic || bytes[..magic] != MEMORY_MAGIC {
-            return Err(MemoryRefusal::Unrecognized {
-                path: path.to_owned(),
-                bytes: bytes.len() as u64,
-            });
-        }
-        if bytes.len() < MEMORY_HEADER {
-            return Err(truncated(bytes.len()));
-        }
-        let version = u32::from_le_bytes(bytes[8..12].try_into().expect("four bytes"));
-        if version != MEMORY_VERSION {
-            return Err(MemoryRefusal::UnsupportedVersion {
-                path: path.to_owned(),
-                found: version,
-            });
-        }
-        let declared = u64::from_le_bytes(bytes[12..20].try_into().expect("eight bytes"));
-        let payload = &bytes[MEMORY_HEADER..];
-        if u64::try_from(payload.len()).map_or(true, |actual| actual != declared) {
-            return Err(truncated(bytes.len()));
-        }
-        let mut aligned = rkyv::util::AlignedVec::<16>::new();
-        aligned.extend_from_slice(payload);
-        let memory = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned).map_err(|error| {
-            MemoryRefusal::Payload {
-                path: path.to_owned(),
-                reason: error.to_string(),
-            }
-        })?;
-        memory
-            .configuration
-            .validate()
-            .map_err(|reason| MemoryRefusal::Payload {
-                path: path.to_owned(),
-                reason,
-            })?;
-        Ok(Admission::Admitted(memory))
+/// The daemon's Memory, `energy.rkyv`, under its envelope.
+impl Persisted for Memory {
+    const ENVELOPE: Envelope = Envelope {
+        magic: *b"ENXMEMRY",
+        version: 1,
+    };
+    type Uncarried = unversioned::Reminder;
+    fn from_archive(archive: &[u8]) -> Result<Self, String> {
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
     }
-    /// A missing entry is the only fresh memory; every other outcome is an admitted memory or a
-    /// refusal that leaves the file unchanged.
-    pub fn load(path: &std::path::Path) -> Result<Self, MemoryRefusal> {
-        match Self::admit(path)? {
-            Admission::Absent => Ok(Self::default()),
-            Admission::Admitted(memory) => Ok(memory),
+    fn upgrade(archive: &[u8]) -> Result<Upgrade<Self>, String> {
+        rkyv::from_bytes::<unversioned::Memory, rkyv::rancor::Error>(archive)
+            .map(Upgrade::from)
+            .map_err(|error| error.to_string())
+    }
+    fn to_archive(&self) -> Result<rkyv::util::AlignedVec, String> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())
+    }
+    fn validate(&self) -> Result<(), String> {
+        self.configuration.validate()
+    }
+}
+
+/// The layout the daemon wrote before its Memory had an envelope, up to
+/// energy-nexus e5722529, which the proof of concept runs: the current
+/// layout but for a reminder's recipient, whose Flow address named a Layer
+/// (signal-flow 74f4dae). Flow now addresses a flow by its Model, and which
+/// model serves a layer is Flow's configuration, not Energy's; so a reminder
+/// is not carried into the current layout. It is answered, for the signals
+/// that repopulate it with a model: `Configure.Reminder`.
+pub mod unversioned {
+    use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
+    use signal_energy_nexus::{Level, Minutes, Percent, Provider, Reading, Threshold};
+
+    #[derive(rkyv::Archive, rkyv::Deserialize, Debug)]
+    pub struct Memory {
+        pub latest: Vec<super::Latest>,
+        pub history: Vec<Reading>,
+        pub configuration: Configuration,
+    }
+    #[derive(rkyv::Archive, rkyv::Deserialize, Debug)]
+    pub struct Configuration {
+        pub polling: Minutes,
+        pub thresholds: Vec<Threshold>,
+        pub reminders: Vec<Reminder>,
+        pub redeem_expiring: Minutes,
+        pub redeem_used_at_least: Percent,
+        pub targets: Vec<ProviderTarget>,
+        pub window_targets: Vec<WindowTarget>,
+    }
+    #[derive(rkyv::Archive, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Reminder {
+        pub provider: Provider,
+        pub level: Level,
+        pub recipient: Recipient,
+    }
+    #[derive(rkyv::Archive, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Recipient(pub Address);
+    #[derive(rkyv::Archive, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Address {
+        pub aspect: Aspect,
+        pub topic: String,
+        pub layer: Layer,
+    }
+    #[derive(rkyv::Archive, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub enum Aspect {
+        Psyche,
+        Mind,
+        Field,
+    }
+    #[derive(rkyv::Archive, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub enum Layer {
+        Primary,
+        Secondary,
+        Tertiary,
+        Quaternary,
+    }
+    /// The reminder in the text form it was configured with:
+    /// `Codex Low { Mind energyNexus Secondary }`.
+    impl std::fmt::Display for Reminder {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let address = &self.recipient.0;
+            write!(
+                formatter,
+                "{:?} {:?} {{ {:?} {} {:?} }}",
+                self.provider, self.level, address.aspect, address.topic, address.layer
+            )
         }
     }
-    /// Writes the envelope and the archive. An existing entry is first admitted by the rule
-    /// `load` applies, so a file `load` refuses is never replaced by this function. Supported
-    /// contract: one cooperating writer; the target can change after admission, a failed or
-    /// interrupted write can leave `memory.new`, and the directory is not synced.
-    pub fn save(&self, path: &std::path::Path) -> Result<(), MemoryRefusal> {
-        let failure = |source| MemoryRefusal::Write {
-            path: path.to_owned(),
-            source,
-        };
-        // The candidate is validated by the rules `admit` applies, before any directory,
-        // temporary file or read of the existing file, so an invalid candidate is never written.
-        self.configuration
-            .validate()
-            .map_err(|reason| MemoryRefusal::Payload {
-                path: path.to_owned(),
-                reason,
-            })?;
-        Self::admit(path)?;
-        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| {
-            failure(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error.to_string(),
-            ))
-        })?;
-        let mut bytes = Vec::with_capacity(MEMORY_HEADER + archive.len());
-        bytes.extend_from_slice(&MEMORY_MAGIC);
-        bytes.extend_from_slice(&MEMORY_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(archive.as_slice());
-        let temporary = path.with_extension("new");
-        let written = (|| {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()
-        })();
-        if let Err(source) = written {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(failure(source));
+    impl From<Memory> for super::Upgrade<super::Memory> {
+        /// Every reading, level and setting is carried; every reminder is
+        /// answered as uncarried.
+        fn from(old: Memory) -> Self {
+            let configuration = old.configuration;
+            Self {
+                memory: super::Memory {
+                    latest: old.latest,
+                    history: old.history,
+                    configuration: super::Configuration {
+                        polling: configuration.polling,
+                        thresholds: configuration.thresholds,
+                        reminders: Vec::new(),
+                        redeem_expiring: configuration.redeem_expiring,
+                        redeem_used_at_least: configuration.redeem_used_at_least,
+                        targets: configuration.targets,
+                        window_targets: configuration.window_targets,
+                    },
+                },
+                uncarried: configuration.reminders,
+            }
         }
-        std::fs::rename(&temporary, path).map_err(|source| {
-            let _ = std::fs::remove_file(&temporary);
-            failure(source)
-        })
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -539,6 +439,7 @@ impl Reminding for Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use energy_nexus_wire::{Admission, MemoryRefusal};
     use ethos_zero::{Actualizing, File, Potential, Validating};
     use signal_energy_nexus::{Instant, Name, Window};
 
@@ -655,7 +556,10 @@ mod tests {
             .unwrap();
         memory.save(&path).unwrap();
 
-        let restored = Memory::load(&path).unwrap();
+        let restored = match Memory::load(&path).unwrap() {
+            Admission::Admitted(memory) => memory,
+            other => panic!("a saved memory is admitted as it is, got {other:?}"),
+        };
         assert_eq!(restored.history().len(), 1);
         assert_eq!(
             restored.latest(&Provider::Codex).unwrap().reading,
@@ -679,8 +583,8 @@ mod tests {
     fn envelope(memory: &Memory) -> Vec<u8> {
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(memory).unwrap();
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&MEMORY_MAGIC);
-        bytes.extend_from_slice(&MEMORY_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&Memory::ENVELOPE.magic);
+        bytes.extend_from_slice(&Memory::ENVELOPE.version.to_le_bytes());
         bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
         bytes.extend_from_slice(archive.as_slice());
         bytes
@@ -710,18 +614,13 @@ mod tests {
                 "rule {broken}"
             );
             assert_eq!(std::fs::read(&path).unwrap(), before);
-            // save of the invalid candidate: refused before any directory or temporary file
-            let fresh = directory
-                .join(format!("never-{broken}"))
-                .join("memory.rkyv");
+            // save of the invalid candidate: refused before any file is made
+            let fresh = directory.join(format!("never-{broken}.rkyv"));
             assert!(matches!(
                 memory.save(&fresh),
                 Err(MemoryRefusal::Payload { .. })
             ));
-            assert!(
-                !fresh.parent().unwrap().exists(),
-                "no parent directory was created"
-            );
+            assert!(!fresh.exists(), "no memory was written");
             assert!(!path.with_extension("new").exists(), "no temporary file");
             assert!(
                 matches!(memory.save(&path), Err(MemoryRefusal::Payload { .. })),

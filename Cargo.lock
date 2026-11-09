@@ -142,6 +142,7 @@ checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 name = "energy-nexus-core"
 version = "0.2.0"
 dependencies = [
+ "energy-nexus-wire",
  "ethos-zero 19.2.0",
  "meta-signal-energy-nexus",
  "rkyv",
@@ -159,7 +160,6 @@ dependencies = [
  "nix",
  "signal",
  "signal-energy-nexus",
- "signal-flow",
  "tempfile",
 ]
 

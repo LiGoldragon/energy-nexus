@@ -93,14 +93,20 @@ impl SharedPlace {
     /// Starts the daemon with the notify socket systemd would give it, and
     /// returns once it announced READY=1.
     fn start(&self) -> Running {
+        self.launch(Stdio::inherit()).0
+    }
+    /// As `start`, with the daemon's standard error taken as given.
+    fn launch(&self, stderr: Stdio) -> (Running, Option<std::process::ChildStderr>) {
         let notify_directory = tempfile::tempdir().unwrap();
         let notify_path = notify_directory.path().join("notify.sock");
         let notify = UnixDatagram::bind(&notify_path).unwrap();
         notify.set_read_timeout(Some(EVENT_WAIT)).unwrap();
-        let child = Self::command(&self.place)
+        let mut child = Self::command(&self.place)
             .env("NOTIFY_SOCKET", &notify_path)
+            .stderr(stderr)
             .spawn()
             .unwrap();
+        let errors = child.stderr.take();
         let running = Running::started(child);
         let mut message = [0_u8; 64];
         match notify.recv(&mut message) {
@@ -110,7 +116,7 @@ impl SharedPlace {
                 panic!("the daemon announced no readiness: {error}");
             }
         }
-        running
+        (running, errors)
     }
 }
 
@@ -154,4 +160,57 @@ fn a_daemon_whose_place_is_absent_does_not_start_or_make_it() {
         .unwrap();
     assert!(!Running::started(child).exit().success());
     assert!(!place.runtime.exists());
+}
+
+/// The file energy-nexus e5722529, the proof of concept, wrote as its
+/// Memory (provenance in crates/core/tests/old_archive_provenance.md).
+const PROOF_OF_CONCEPT_MEMORY: &[u8] =
+    include_bytes!("../../core/tests/fixtures/energy-e5722529.rkyv");
+
+#[test]
+fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_served() {
+    use energy_nexus_core::{Configuring, Memory, Remembering};
+    use energy_nexus_wire::{Admission, MemoryPathing, Persisted};
+    use std::io::Read;
+    let shared = SharedPlace::declared();
+    // activation-places.md step 3: memory.rkyv moved to <State>/energy.rkyv
+    std::fs::write(shared.place.memory(), PROOF_OF_CONCEPT_MEMORY).unwrap();
+    let (running, errors) = shared.launch(Stdio::piped());
+    for socket in shared.own() {
+        UnixStream::connect(&socket)
+            .unwrap_or_else(|error| panic!("{} listens at readiness: {error}", socket.display()));
+    }
+    assert!(running.stop().success());
+    let mut report = String::new();
+    errors.unwrap().read_to_string(&mut report).unwrap();
+    println!("daemon over the proof of concept memory:\n{report}");
+    assert!(report.contains("upgraded from the archive written before the envelope"));
+    assert!(report.contains("Codex Low { Mind energyNexus Secondary }"));
+    assert!(report.contains("Claude Out { Psyche core Primary }"));
+    let bytes = std::fs::read(shared.place.memory()).unwrap();
+    assert_eq!(&bytes[..8], b"ENXMEMRY");
+    match Memory::load(&shared.place.memory()).unwrap() {
+        Admission::Admitted(memory) => {
+            assert_eq!(memory.history().len(), 3);
+            assert_eq!(memory.configuration().polling.0, 5);
+            assert!(memory.configuration().reminders.is_empty());
+        }
+        other => panic!("the upgraded memory is current, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_daemon_over_a_foreign_memory_does_not_start_and_leaves_it() {
+    use energy_nexus_wire::MemoryPathing;
+    let shared = SharedPlace::declared();
+    let foreign: Vec<u8> = (0..4096u32).map(|n| (n % 251) as u8).collect();
+    std::fs::write(shared.place.memory(), &foreign).unwrap();
+    let child = SharedPlace::command(&shared.place)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(!Running::started(child).exit().success());
+    assert_eq!(std::fs::read(shared.place.memory()).unwrap(), foreign);
+    assert_eq!(std::fs::read_dir(&shared.place.runtime).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&shared.place.state).unwrap().count(), 1);
 }
