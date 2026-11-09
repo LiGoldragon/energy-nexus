@@ -195,7 +195,7 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
     use protos::{Protosizable, Textualizable};
     let set = meta_signal_energy_nexus::Set::Program(meta_signal_energy_nexus::ProgramPath {
         program: meta_signal_energy_nexus::Program::Flow,
-        path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow".into()),
+        path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow-nexus".into()),
     });
     let text = meta_signal_energy_nexus::Query::Configure(set.clone())
         .datomize(Vec::new())
@@ -210,6 +210,6 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
         .protosize()
         .textualize();
     assert_eq!(answer, configured);
-    assert_eq!(read().flow.as_deref(), Some("/home/li/.local/bin/flow"));
+    assert_eq!(read().flow.as_deref(), Some("/home/li/.local/bin/flow-nexus"));
     assert!(running.stop().success());
 }

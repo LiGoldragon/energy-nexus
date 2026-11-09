@@ -18,7 +18,7 @@ energy-translator main /run/user/1001/nexus/main ~/.local/state/nexus/main
 { main }
 energy-nexus 'Read.Codex'
 energy-nexus-meta 'Configure.RedeemExpiring.720'
-energy-nexus-meta 'Configure.Program.{ Flow /home/li/.local/bin/flow }'
+energy-nexus-meta 'Configure.Program.{ Flow /home/li/.local/bin/flow-nexus }'
 energy-pace
 ```
 
@@ -34,6 +34,6 @@ Energy reads a provider on three events and never on an interval:
 
 When nothing happens, nothing is read.
 
-The configured Flow program is run with one argument, the `Send` datom, and reaches the Flow Nexus at the place its own configuration names: once Flow 0.53.3 is at main, Home's `~/.local/bin/flow` is Flow 0.53.3's `flow`, which reads `~/.config/nexus/flow.datom`, `{ main }`.
+The configured Flow program is run with one argument, the `Send` datom, and reaches the Flow Nexus at the place its own configuration names: once Flow 0.53.3 is at main, Home's `~/.local/bin/flow-nexus` is Flow 0.53.3's `flow-nexus`, which reads `~/.config/nexus/flow-nexus.datom`, `{ main }`.
 
 An explicit `Redeem.Codex` is treated as evidence that work is waiting. It never redeems a later available reset while an earlier one stands. Tests use recorded provider documents and a fake Flow peer; they do not read live providers or consume a real reset.
