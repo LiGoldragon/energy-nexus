@@ -70,9 +70,6 @@ impl Memory {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes).map_err(|error| error.to_string())
     }
     pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
         let bytes =
             rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())?;
         let temporary = path.with_extension("new");

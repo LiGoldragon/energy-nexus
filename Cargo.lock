@@ -190,8 +190,10 @@ dependencies = [
  "energy-nexus-emission",
  "energy-nexus-wire",
  "meta-signal-energy-nexus",
+ "nix",
  "signal",
  "signal-energy-nexus",
+ "tempfile",
 ]
 
 [[package]]
@@ -227,8 +229,10 @@ dependencies = [
 name = "energy-nexus-wire"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "rkyv",
  "signal",
+ "tempfile",
 ]
 
 [[package]]

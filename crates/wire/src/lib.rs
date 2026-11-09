@@ -84,3 +84,133 @@ impl SocketPathing for Place {
         self.runtime.join("energy-meta-translator.sock")
     }
 }
+/// The files Energy keeps in its place's State, each under Energy's own name:
+/// the place is shared with every other Nexus at it.
+pub trait MemoryPathing {
+    /// `<State>/energy.rkyv`: the daemon's Memory.
+    fn memory(&self) -> std::path::PathBuf;
+    /// `<State>/energy-translator.rkyv`: the translator's configured programs.
+    fn translator_memory(&self) -> std::path::PathBuf;
+}
+impl MemoryPathing for Place {
+    fn memory(&self) -> std::path::PathBuf {
+        self.state.join("energy.rkyv")
+    }
+    fn translator_memory(&self) -> std::path::PathBuf {
+        self.state.join("energy-translator.rkyv")
+    }
+}
+/// A place's two directories are declared by the environment and belong to
+/// no Nexus: a process at the place finds them, and never makes or removes
+/// them.
+pub trait Declared {
+    /// Both directories exist; otherwise the process does not start.
+    fn confirm(&self) -> std::io::Result<()>;
+}
+impl Declared for Place {
+    fn confirm(&self) -> std::io::Result<()> {
+        for directory in [&self.runtime, &self.state] {
+            if !directory.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "place {}: {} is not a directory; the place is declared by the environment",
+                        self.name.0,
+                        directory.display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+/// The sockets one process makes at its place, and nothing else there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedSockets(pub Vec<std::path::PathBuf>);
+pub trait OwningSockets {
+    /// Removes the sockets, each if present.
+    fn remove(&self);
+    /// Takes SIGTERM and SIGINT from the calling thread and every thread it
+    /// starts after, and waits for them on a thread of its own: on either,
+    /// the sockets are removed and the process exits 0. Called before any
+    /// other thread is started.
+    fn remove_at_stop(&self) -> std::io::Result<()>;
+}
+impl OwningSockets for OwnedSockets {
+    fn remove(&self) {
+        for socket in &self.0 {
+            let _ = std::fs::remove_file(socket);
+        }
+    }
+    fn remove_at_stop(&self) -> std::io::Result<()> {
+        use nix::sys::signal::{SigSet, Signal};
+        let mut stopping = SigSet::empty();
+        stopping.add(Signal::SIGTERM);
+        stopping.add(Signal::SIGINT);
+        stopping.thread_block().map_err(std::io::Error::from)?;
+        let sockets = self.clone();
+        // A child started through std::process begins with an empty mask:
+        // std resets it before exec.
+        std::thread::spawn(move || loop {
+            if stopping.wait().is_ok() {
+                sockets.remove();
+                std::process::exit(0);
+            }
+        });
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::{MemoryPathing, OwnedSockets, OwningSockets, Place, PlaceName, SocketPathing};
+
+    fn place(directory: &std::path::Path) -> Place {
+        Place {
+            name: PlaceName("main".into()),
+            runtime: directory.join("runtime"),
+            state: directory.join("state"),
+        }
+    }
+
+    #[test]
+    fn energy_files_in_a_shared_place_carry_energy_names() {
+        let place = place(std::path::Path::new("/place"));
+        assert_eq!(place.memory(), std::path::Path::new("/place/state/energy.rkyv"));
+        assert_eq!(
+            place.translator_memory(),
+            std::path::Path::new("/place/state/energy-translator.rkyv")
+        );
+        assert_eq!(place.public(), std::path::Path::new("/place/runtime/energy.sock"));
+    }
+
+    #[test]
+    fn removing_owned_sockets_leaves_the_place_and_every_other_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let place = place(directory.path());
+        std::fs::create_dir(&place.runtime).unwrap();
+        let own = OwnedSockets(vec![place.public(), place.meta()]);
+        for socket in &own.0 {
+            std::fs::write(socket, "").unwrap();
+        }
+        let others = [place.public_translator(), place.runtime.join("flow.sock")];
+        for other in &others {
+            std::fs::write(other, "").unwrap();
+        }
+        own.remove();
+        assert!(own.0.iter().all(|socket| !socket.exists()));
+        assert!(others.iter().all(|other| other.exists()));
+        assert!(place.runtime.is_dir());
+    }
+
+    #[test]
+    fn an_absent_place_is_refused_and_not_made() {
+        use super::Declared;
+        let directory = tempfile::tempdir().unwrap();
+        let place = place(directory.path());
+        assert!(place.confirm().is_err());
+        assert!(!place.runtime.exists() && !place.state.exists());
+        std::fs::create_dir(&place.runtime).unwrap();
+        std::fs::create_dir(&place.state).unwrap();
+        assert!(place.confirm().is_ok());
+    }
+}

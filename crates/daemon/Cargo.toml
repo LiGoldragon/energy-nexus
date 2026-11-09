@@ -11,3 +11,7 @@ energy-nexus-wire={path="../wire"}
 signal-energy-nexus.workspace=true
 meta-signal-energy-nexus.workspace=true
 signal.workspace=true
+
+[dev-dependencies]
+nix={version="0.30",features=["signal","inotify"]}
+tempfile="3"

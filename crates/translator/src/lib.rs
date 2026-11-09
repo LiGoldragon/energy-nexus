@@ -3,7 +3,9 @@ use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Emittable, Outcome,
     Query as EmissionQuery, Response as EmissionResponse, Send,
 };
-use energy_nexus_wire::{Framing, Place, SocketPathing};
+use energy_nexus_wire::{
+    Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place, SocketPathing,
+};
 use serde_json::{json, Value};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{
@@ -39,14 +41,14 @@ impl Translating for Translator {
         }
     }
     fn serve(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.place.runtime)?;
-        for path in [
+        self.place.confirm()?;
+        let own = OwnedSockets(vec![
             self.place.public_translator(),
             self.place.meta_translator(),
             self.place.emission(),
-        ] {
-            let _ = std::fs::remove_file(path);
-        }
+        ]);
+        own.remove_at_stop()?;
+        own.remove();
         let public = UnixListener::bind(self.place.public_translator())?;
         let meta = UnixListener::bind(self.place.meta_translator())?;
         let emission = UnixListener::bind(self.place.emission())?;
@@ -172,8 +174,7 @@ impl Emittable<Translator> for Send {
 }
 impl Translator {
     pub fn open(place: Place) -> Self {
-        let path = place.state.join("translator.rkyv");
-        let programs = std::fs::read(path)
+        let programs = std::fs::read(place.translator_memory())
             .ok()
             .and_then(|bytes| rkyv::from_bytes::<Programs, rkyv::rancor::Error>(&bytes).ok())
             .unwrap_or_default();
@@ -209,16 +210,16 @@ impl Translator {
             _ => false,
         };
         if changed {
-            std::fs::create_dir_all(&self.place.state).map_err(|error| error.to_string())?;
             let programs = self
                 .programs
                 .lock()
                 .map_err(|_| "translator memory unavailable")?;
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&*programs)
                 .map_err(|error| error.to_string())?;
-            let temporary = self.place.state.join("translator.new");
+            let memory = self.place.translator_memory();
+            let temporary = memory.with_extension("new");
             std::fs::write(&temporary, bytes.as_slice()).map_err(|error| error.to_string())?;
-            std::fs::rename(temporary, self.place.state.join("translator.rkyv"))
+            std::fs::rename(temporary, memory)
                 .map_err(|error| error.to_string())?;
         }
         Ok(changed)

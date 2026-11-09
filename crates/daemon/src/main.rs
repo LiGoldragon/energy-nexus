@@ -6,7 +6,9 @@ use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
     Outcome as ExternalOutcome, Query as EmissionQuery, Response as EmissionResponse, Send,
 };
-use energy_nexus_wire::{Framing, Place, SocketPathing};
+use energy_nexus_wire::{
+    Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place, SocketPathing,
+};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{Call, Changed_Data, Provider, Query, Read_Data, Refused, Response};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -53,7 +55,7 @@ impl Emitting for Nexus {
 }
 impl Nexus {
     fn persist(&self) -> Result<(), String> {
-        self.memory.save(&self.place.state.join("memory.rkyv"))
+        self.memory.save(&self.place.memory())
     }
     fn attempt(&mut self, operation: Operation) -> OperationOutcome {
         match operation {
@@ -175,15 +177,14 @@ trait Serving {
 }
 impl Serving for Place {
     fn serve(self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.runtime)?;
-        std::fs::create_dir_all(&self.state)?;
-        for path in [self.public(), self.meta()] {
-            let _ = std::fs::remove_file(path);
-        }
+        self.confirm()?;
+        let own = OwnedSockets(vec![self.public(), self.meta()]);
+        own.remove_at_stop()?;
+        own.remove();
         let public = UnixListener::bind(self.public())?;
         let meta = UnixListener::bind(self.meta())?;
         let nexus = Arc::new(Mutex::new(Nexus {
-            memory: Memory::load(&self.state.join("memory.rkyv")).unwrap_or_default(),
+            memory: Memory::load(&self.memory()).unwrap_or_default(),
             subscribers: Vec::new(),
             place: self.clone(),
         }));

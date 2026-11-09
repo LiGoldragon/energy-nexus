@@ -13,10 +13,6 @@ fn main() {
         .next()
         .map(std::path::PathBuf::from)
         .expect("usage: energy-nexus-poc NAME RUNTIME STATE");
-    std::fs::create_dir_all(&runtime).expect("create runtime directory");
-    std::fs::create_dir_all(&state).expect("create state directory");
-    std::fs::write(state.join("deployment"), "Energy Nexus proof of concept\n")
-        .expect("write deployment record");
     let directory = std::env::current_exe()
         .expect("current executable")
         .parent()
@@ -37,6 +33,11 @@ fn main() {
         .spawn()
         .expect("start daemon");
     let status = daemon.wait().expect("wait for daemon");
-    let _ = translator.kill();
+    // SIGTERM, so the translator removes its own sockets as it stops.
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(translator.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+    let _ = translator.wait();
     std::process::exit(status.code().unwrap_or(1));
 }
