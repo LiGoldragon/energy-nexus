@@ -3,10 +3,13 @@
 //! - A turn ends on the provider (Flow's `Observe.TurnEnds`, through the
 //!   translator). A turn end that arrives while a read of that provider is in
 //!   flight marks it for one more read when that one ends, so a burst of turn
-//!   ends is one read and at most one follow-up.
+//!   ends is one read and at most one follow-up. When Flow comes back after
+//!   going, its new opening is taken as the first one was.
 //! - Its window resets. Each reading says when its provider's next window
-//!   resets; one timer is set for that moment and reads once when it fires. A
-//!   newer reading replaces the timer.
+//!   resets; the provider's alarm is set for that wall-clock instant and reads
+//!   once when it fires. A newer reading replaces the alarm. The alarm is on
+//!   the wall clock, absolute, so a suspend or a clock step does not make it
+//!   late: it fires at the instant, or at once on waking when that has passed.
 //! - A question: `Read.Provider` is answered from memory, unless the latest
 //!   reading is older than the last turn end on the provider (or there is
 //!   none), when it is read first.
@@ -16,12 +19,14 @@ use energy_nexus_core::Resetting;
 use energy_nexus_emission::TurnEnd;
 use signal_energy_nexus::{Provider, Reading, Refused, Response};
 use std::future::Future;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// What wakes the schedule.
 #[derive(Debug)]
 pub enum Event {
-    /// The subscription opened: the last turn end on each provider.
+    /// The subscription opened, at start or when Flow came back: the last
+    /// turn end on each provider.
     TurnEndsObserved(Vec<TurnEnd>),
     /// A turn ended.
     TurnEnded(TurnEnd),
@@ -29,6 +34,9 @@ pub enum Event {
     Question(Provider, oneshot::Sender<Response>),
     /// A read the schedule started has ended.
     Finished(Provider, Response),
+    /// The provider's alarm fired: its window reset, if the alarm is still
+    /// the one set (a newer reading may have moved it).
+    WindowReset(Provider),
 }
 
 /// The reads the schedule asks for, and the answers from memory.
@@ -39,17 +47,82 @@ pub trait Reads: Clone + Send + Sync + 'static {
     fn recall(&self, provider: Provider) -> impl Future<Output = Response> + Send;
 }
 
-/// Wall time in Unix seconds, which readings and turn ends are stamped in.
+/// Wall time in Unix seconds, which readings and turn ends are stamped in,
+/// and one alarm per provider at a wall-clock instant.
 pub trait Clock: Send + 'static {
     fn unix_now(&self) -> i64;
+    /// Sets the provider's alarm at `at`, Unix seconds, replacing the one
+    /// set before, or clears it (`None`). A fired alarm is sent on `events`
+    /// as `WindowReset`.
+    fn alarm(&mut self, provider: &Provider, at: Option<i64>, events: &mpsc::UnboundedSender<Event>);
 }
-pub struct WallClock;
+/// The system's wall clock. Each provider's alarm is a timerfd on
+/// `CLOCK_REALTIME`, set with `TFD_TIMER_ABSTIME` at the reset's Unix instant:
+/// the kernel holds the instant, not a length of time, so it fires at that
+/// wall-clock moment whatever happens between (a suspend, an NTP step), or
+/// at once on resume when the moment passed during it. One thread per
+/// provider blocks on its timer's expiry and sends it to the schedule.
+#[derive(Default)]
+pub struct WallClock {
+    alarms: Vec<(Provider, Arc<nix::sys::timerfd::TimerFd>)>,
+}
+impl WallClock {
+    fn timer(
+        &mut self,
+        provider: &Provider,
+        events: &mpsc::UnboundedSender<Event>,
+    ) -> Option<Arc<nix::sys::timerfd::TimerFd>> {
+        use nix::sys::timerfd::{ClockId, TimerFd, TimerFlags};
+        if let Some((_, timer)) = self.alarms.iter().find(|(known, _)| known == provider) {
+            return Some(Arc::clone(timer));
+        }
+        let timer = match TimerFd::new(ClockId::CLOCK_REALTIME, TimerFlags::TFD_CLOEXEC) {
+            Ok(timer) => Arc::new(timer),
+            Err(error) => {
+                eprintln!("energy-nexus: no window-reset alarm for {provider:?}: {error}");
+                return None;
+            }
+        };
+        let fired = Arc::clone(&timer);
+        let events = events.clone();
+        let named = provider.clone();
+        // Each pass blocks in read(2) until the alarm's instant.
+        std::thread::spawn(move || {
+            while fired.wait().is_ok() {
+                if events.send(Event::WindowReset(named.clone())).is_err() {
+                    return;
+                }
+            }
+        });
+        self.alarms.push((provider.clone(), Arc::clone(&timer)));
+        Some(timer)
+    }
+}
 impl Clock for WallClock {
     fn unix_now(&self) -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs() as i64)
             .unwrap_or(0)
+    }
+    fn alarm(&mut self, provider: &Provider, at: Option<i64>, events: &mpsc::UnboundedSender<Event>) {
+        use nix::sys::time::TimeSpec;
+        use nix::sys::timerfd::{Expiration, TimerSetTimeFlags};
+        let Some(timer) = self.timer(provider, events) else {
+            return;
+        };
+        let set = match at {
+            // An absolute zero would disarm the timer; any instant passed
+            // fires at once.
+            Some(at) => timer.set(
+                Expiration::OneShot(TimeSpec::new(at.max(1), 0)),
+                TimerSetTimeFlags::TFD_TIMER_ABSTIME,
+            ),
+            None => timer.unset(),
+        };
+        if let Err(error) = set {
+            eprintln!("energy-nexus: the window-reset alarm for {provider:?} is not set: {error}");
+        }
     }
 }
 
@@ -65,7 +138,8 @@ struct Track {
     again: bool,
     /// Questions waiting on the read in flight.
     waiting: Vec<oneshot::Sender<Response>>,
-    /// The moment the next window resets, from the latest reading.
+    /// The moment the next window resets, from the latest reading: the
+    /// instant the provider's alarm is set at.
     resets_at: Option<i64>,
 }
 impl Track {
@@ -79,15 +153,6 @@ impl Track {
             (Some(read), Some(ended)) => read <= ended,
         }
     }
-    fn reading(&mut self, reading: &Reading) {
-        self.read_at = Some(reading.at.0);
-        self.resets_at = reading.next_reset().map(|instant| instant.0);
-    }
-}
-
-enum Wake {
-    Event(Option<Event>),
-    Reset(Provider),
 }
 
 pub struct Schedule<R: Reads, C: Clock> {
@@ -101,7 +166,7 @@ pub struct Schedule<R: Reads, C: Clock> {
 
 impl<R: Reads, C: Clock> Schedule<R, C> {
     /// A schedule over `reads`, knowing the latest reading of each provider;
-    /// each one's reset timer is set from it.
+    /// each one's alarm is set from it.
     pub fn new(reads: R, clock: C, latest: Vec<Reading>) -> Self {
         let (events, inbox) = mpsc::unbounded_channel();
         let mut schedule = Self {
@@ -113,7 +178,7 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
             inbox,
         };
         for reading in &latest {
-            schedule.track(&reading.provider).reading(reading);
+            schedule.reading(reading);
         }
         schedule
     }
@@ -127,39 +192,24 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
             Provider::Codex => &mut self.codex,
         }
     }
-    /// Runs for as long as the daemon does: it waits on the next event or
-    /// the next window reset, whichever comes first.
+    /// Runs for as long as the daemon does, taking each event as it comes;
+    /// window resets come as events from the clock's alarms.
     pub async fn run(mut self) {
-        loop {
-            let wake = match self.due() {
-                Some((provider, deadline)) => tokio::select! {
-                    event = self.inbox.recv() => Wake::Event(event),
-                    () = tokio::time::sleep_until(deadline) => Wake::Reset(provider),
-                },
-                None => Wake::Event(self.inbox.recv().await),
-            };
-            match wake {
-                Wake::Event(Some(event)) => self.on(event),
-                Wake::Event(None) => return,
-                Wake::Reset(provider) => self.reset(provider),
-            }
+        while let Some(event) = self.inbox.recv().await {
+            self.on(event);
         }
     }
-    /// The next window reset, and the moment it is due on the timer.
-    fn due(&self) -> Option<(Provider, tokio::time::Instant)> {
-        let soonest = [
-            (Provider::Claude, self.claude.resets_at),
-            (Provider::Codex, self.codex.resets_at),
-        ]
-        .into_iter()
-        .filter_map(|(provider, resets)| resets.map(|resets| (provider, resets)))
-        .min_by_key(|(_, resets)| *resets)?;
-        let (provider, resets) = soonest;
-        let wait = (resets - self.clock.unix_now()).max(0) as u64;
-        Some((
-            provider,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(wait),
-        ))
+    /// A reading is the provider's latest: its time, and its next window
+    /// reset as the provider's alarm.
+    fn reading(&mut self, reading: &Reading) {
+        let resets = reading.next_reset().map(|instant| instant.0);
+        let track = self.track(&reading.provider);
+        track.read_at = Some(reading.at.0);
+        self.resets(&reading.provider, resets);
+    }
+    fn resets(&mut self, provider: &Provider, at: Option<i64>) {
+        self.track(provider).resets_at = at;
+        self.clock.alarm(provider, at, &self.events);
     }
     fn on(&mut self, event: Event) {
         match event {
@@ -194,11 +244,11 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
                 }
             }
             Event::Finished(provider, response) => {
-                let track = self.track(&provider);
-                track.in_flight = false;
+                self.track(&provider).in_flight = false;
                 if let Response::Read(read) = &response {
-                    track.reading(&read.reading);
+                    self.reading(&read.reading);
                 }
+                let track = self.track(&provider);
                 if track.again {
                     track.again = false;
                     self.start(provider);
@@ -208,11 +258,17 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
                     }
                 }
             }
+            Event::WindowReset(provider) => {
+                let now = self.clock.unix_now();
+                if self.track(&provider).resets_at.is_some_and(|at| at <= now) {
+                    self.reset(provider);
+                }
+            }
         }
     }
-    /// The provider's window reset: its timer is spent, and it is read.
+    /// The provider's window reset: its alarm is spent, and it is read.
     fn reset(&mut self, provider: Provider) {
-        self.track(&provider).resets_at = None;
+        self.resets(&provider, None);
         self.want(provider);
     }
     /// A read is wanted: started now, or owed once the one in flight ends.
@@ -254,26 +310,91 @@ pub fn ask(events: &mpsc::UnboundedSender<Event>, provider: Provider) -> Respons
 mod tests {
     use super::*;
     use signal_energy_nexus::{Instant, Minutes, Name, Percent, Read_Data, Window};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::Semaphore;
 
-    /// The test's wall clock: a fixed origin advanced by tokio's paused time.
+    /// The test's wall clock: a fixed origin advanced by tokio's paused
+    /// time, where wall time and the monotonic clock move together. Each
+    /// alarm is a task sleeping on paused time until its instant.
     struct PausedClock {
         unix: i64,
         origin: tokio::time::Instant,
+        alarms: Vec<(Provider, tokio::task::JoinHandle<()>)>,
     }
     impl PausedClock {
         fn at(unix: i64) -> Self {
             Self {
                 unix,
                 origin: tokio::time::Instant::now(),
+                alarms: Vec::new(),
             }
         }
     }
     impl Clock for PausedClock {
         fn unix_now(&self) -> i64 {
             self.unix + (tokio::time::Instant::now() - self.origin).as_secs() as i64
+        }
+        fn alarm(&mut self, provider: &Provider, at: Option<i64>, events: &mpsc::UnboundedSender<Event>) {
+            self.alarms.retain(|(known, task)| {
+                let replaced = known == provider;
+                if replaced {
+                    task.abort();
+                }
+                !replaced
+            });
+            if let Some(at) = at {
+                let deadline =
+                    self.origin + Duration::from_secs((at - self.unix).max(0) as u64);
+                let events = events.clone();
+                let named = provider.clone();
+                let task = tokio::spawn(async move {
+                    tokio::time::sleep_until(deadline).await;
+                    let _ = events.send(Event::WindowReset(named));
+                });
+                self.alarms.push((provider.clone(), task));
+            }
+        }
+    }
+
+    /// A wall clock that jumps while the monotonic clock stands still, as
+    /// over a suspend or a clock step: each alarm is held as its wall-clock
+    /// instant, as the kernel holds an absolute `CLOCK_REALTIME` timer, and
+    /// fires when the wall clock reaches or passes it.
+    #[derive(Clone)]
+    struct SteppedClock {
+        wall: Arc<Mutex<i64>>,
+        alarms: Arc<Mutex<Vec<(Provider, i64, mpsc::UnboundedSender<Event>)>>>,
+    }
+    impl SteppedClock {
+        fn at(unix: i64) -> Self {
+            Self {
+                wall: Arc::new(Mutex::new(unix)),
+                alarms: Arc::default(),
+            }
+        }
+        /// The wall clock is set to `unix`; every alarm passed fires.
+        fn step(&self, unix: i64) {
+            *self.wall.lock().unwrap() = unix;
+            self.alarms.lock().unwrap().retain(|(provider, at, events)| {
+                let due = *at <= unix;
+                if due {
+                    let _ = events.send(Event::WindowReset(provider.clone()));
+                }
+                !due
+            });
+        }
+    }
+    impl Clock for SteppedClock {
+        fn unix_now(&self) -> i64 {
+            *self.wall.lock().unwrap()
+        }
+        fn alarm(&mut self, provider: &Provider, at: Option<i64>, events: &mpsc::UnboundedSender<Event>) {
+            let mut alarms = self.alarms.lock().unwrap();
+            alarms.retain(|(known, _, _)| known != provider);
+            if let Some(at) = at {
+                alarms.push((provider.clone(), at, events.clone()));
+            }
         }
     }
 
@@ -582,5 +703,84 @@ mod tests {
             .unwrap();
         settle().await;
         assert_eq!(provided.reads(), vec![(Provider::Claude, START)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_window_reset_fires_at_its_wall_clock_instant_across_a_jump() {
+        // In memory: a Codex reading whose window resets an hour from now.
+        // The machine sleeps two hours: the wall clock jumps, and the
+        // monotonic clock (tokio's paused time) does not move at all. A timer
+        // counted in monotonic time would still be an hour away; the alarm,
+        // held as its wall-clock instant, has passed, and reads once.
+        let provided = Provided::new(5 * 3_600);
+        let clock = SteppedClock::at(START);
+        provided.remember(reading(Provider::Codex, START - 60, START + 3_600));
+        let schedule = Schedule::new(
+            provided.clone(),
+            clock.clone(),
+            vec![reading(Provider::Codex, START - 60, START + 3_600)],
+        );
+        let _events = schedule.sender();
+        tokio::spawn(schedule.run());
+        settle().await;
+        clock.step(START + 3_599);
+        settle().await;
+        assert!(provided.reads().is_empty(), "not before its instant");
+        let monotonic = tokio::time::Instant::now();
+        clock.step(START + 2 * 3_600);
+        settle().await;
+        assert_eq!(provided.count(&Provider::Codex), 1, "read once on waking");
+        assert!(tokio::time::Instant::now() - monotonic < Duration::from_secs(1));
+        // The reading's own reset (five hours after it, on the provided
+        // fake's clock) is the next alarm: set, and not fired by the jump.
+        let alarms = clock.alarms.lock().unwrap();
+        assert_eq!(alarms.len(), 1);
+        assert_eq!(alarms[0].0, Provider::Codex);
+        assert!(alarms[0].1 > START + 2 * 3_600);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replaced_alarm_that_fired_reads_nothing() {
+        // An alarm fires for an instant a newer reading has already moved:
+        // the schedule reads only when the provider's reset has come.
+        let provided = Provided::new(0);
+        let clock = SteppedClock::at(START);
+        let schedule = Schedule::new(
+            provided.clone(),
+            clock.clone(),
+            vec![reading(Provider::Claude, START - 60, START + 3_600)],
+        );
+        let events = schedule.sender();
+        tokio::spawn(schedule.run());
+        events.send(Event::WindowReset(Provider::Claude)).unwrap();
+        settle().await;
+        assert!(provided.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_wall_clock_alarm_is_an_absolute_realtime_timer_that_fires_at_its_instant() {
+        let mut clock = WallClock::default();
+        let (events, mut inbox) = mpsc::unbounded_channel();
+        let instant = clock.unix_now() + 2;
+        clock.alarm(&Provider::Claude, Some(instant), &events);
+        // The kernel holds it on CLOCK_REALTIME (clockid 0) with
+        // TFD_TIMER_ABSTIME (settime flags 01): an instant, not a length.
+        use std::os::fd::{AsFd, AsRawFd};
+        let fd = clock.alarms[0].1.as_fd().as_raw_fd();
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).unwrap();
+        println!("alarm fdinfo:\n{info}");
+        assert!(info.contains("clockid: 0\n"), "{info}");
+        assert!(info.contains("settime flags: 01\n"), "{info}");
+        let fired = tokio::time::timeout(Duration::from_secs(30), inbox.recv())
+            .await
+            .expect("the alarm fires");
+        assert!(matches!(fired, Some(Event::WindowReset(Provider::Claude))));
+        assert!(clock.unix_now() >= instant, "not before its instant");
+        // An instant already passed fires at once.
+        clock.alarm(&Provider::Codex, Some(instant - 600), &events);
+        let fired = tokio::time::timeout(Duration::from_secs(30), inbox.recv())
+            .await
+            .expect("a passed instant fires at once");
+        assert!(matches!(fired, Some(Event::WindowReset(Provider::Codex))));
     }
 }

@@ -17,6 +17,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+pub mod flow;
+
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Programs {
     pub codex: Option<String>,
@@ -135,7 +137,7 @@ impl Listening {
     }
 }
 /// Flow's frames: a four-byte big-endian length, then the rkyv archive.
-trait FlowFraming {
+pub(crate) trait FlowFraming {
     fn write_flow_frame(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     fn read_flow_frame(&mut self) -> std::io::Result<Vec<u8>>;
 }
@@ -175,7 +177,7 @@ pub fn turn_end(flow: &signal_flow::TurnEnd) -> TurnEnd {
     }
 }
 /// What one frame from Flow's turn-end subscription says, for the daemon.
-fn turn_end_outcome(frame: &[u8]) -> Outcome {
+pub(crate) fn turn_end_outcome(frame: &[u8]) -> Outcome {
     match rkyv::from_bytes::<signal_flow::Response, rkyv::rancor::Error>(frame) {
         Ok(signal_flow::Response::TurnEndsObserved(ends)) => {
             Outcome::TurnEndsObserved(ends.iter().map(turn_end).collect())
@@ -295,61 +297,12 @@ impl Translator {
     pub fn flow_socket(&self) -> std::path::PathBuf {
         self.place.runtime.join("flow.sock")
     }
-    /// Holds the daemon's `TurnEnds` open: subscribes to Flow's turn ends at
-    /// the place and hands each frame on as an Outcome, in Energy's words.
-    /// Ends with `Down` when Flow cannot be reached, closes or answers
-    /// otherwise; when the daemon goes, the Flow connection is closed.
-    fn relay_turn_ends(&self, mut daemon: UnixStream) {
-        let send = |daemon: &mut UnixStream, outcome: Outcome| {
-            EmissionResponse::Emitted(outcome)
-                .signalize()
-                .map_err(|error| format!("{error:?}"))
-                .and_then(|signal| {
-                    daemon
-                        .write_frame(signal.bytes())
-                        .map_err(|error| error.to_string())
-                })
-        };
-        let query = signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds);
-        let subscribed = UnixStream::connect(self.flow_socket()).and_then(|mut flow| {
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            flow.write_flow_frame(&bytes)?;
-            Ok(flow)
-        });
-        let mut flow = match subscribed {
-            Ok(flow) => flow,
-            Err(error) => {
-                eprintln!(
-                    "energy-translator: Flow at {} not subscribed: {error}",
-                    self.flow_socket().display()
-                );
-                let _ = send(&mut daemon, Outcome::Down);
-                return;
-            }
-        };
-        // The daemon sends nothing more on this connection: its end is the
-        // daemon gone, and the Flow subscription is closed with it.
-        if let (Ok(mut watched), Ok(closing)) = (daemon.try_clone(), flow.try_clone()) {
-            std::thread::spawn(move || {
-                let mut byte = [0u8; 1];
-                while matches!(watched.read(&mut byte), Ok(read) if read > 0) {}
-                let _ = closing.shutdown(std::net::Shutdown::Both);
-            });
-        }
-        loop {
-            let outcome = match flow.read_flow_frame() {
-                Ok(frame) => turn_end_outcome(&frame),
-                Err(error) => {
-                    eprintln!("energy-translator: Flow's turn ends closed: {error}");
-                    Outcome::Down
-                }
-            };
-            let down = matches!(outcome, Outcome::Down);
-            if send(&mut daemon, outcome).is_err() || down {
-                return;
-            }
-        }
+    /// Holds the daemon's `TurnEnds` open for as long as the daemon does:
+    /// subscribes to Flow's turn ends at the place, hands each frame on as an
+    /// Outcome in Energy's words, and when Flow goes waits for its socket to
+    /// appear and subscribes again on that event (`flow::TurnEndRelay`).
+    fn relay_turn_ends(&self, daemon: UnixStream) {
+        flow::TurnEndRelay::start(self.flow_socket(), flow::ObserveTurnEnds, daemon)
     }
     /// The translator process at its place, with its memory: an archive
     /// written before the envelope is upgraded on open, and a memory that

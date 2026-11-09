@@ -1,5 +1,15 @@
 # Upgrades
 
+## 0.3.1 — Energy outlives Flow; window resets on the wall clock
+
+All five packages move to 0.3.1. No contract or memory change.
+
+**Flow goes, Energy stays.** The translator holds the daemon's `Emit.TurnEnds` across Flow going and coming back. When Flow's subscription closes it waits on an inotify watch of the place's runtime directory, armed before it first looked for Flow, and subscribes again on `flow.sock` being made (`IN_CREATE`), moved in (`IN_MOVED_TO`) or having its mode set (`IN_ATTRIB`, which Flow 0.53.3 does once the socket listens). An attempt refused after an event waits for the next one; there is no retry on a timer. The new opening, the last turn end on each provider, reads each provider whose reading is older than it, as at start. While Flow is absent the daemon answers from memory and reads nothing for it. `Down` now means the watch on the place is lost.
+
+**Units.** The translator's unit wants the Flow unit and is ordered after it (`Wants=`, `After=`); it is no longer part of it and no longer wanted by it, so stopping or restarting Flow leaves Energy running. The daemon stays ordered after the translator and bound to it.
+
+**Window resets survive a suspend.** Each provider's reset alarm is a timerfd on `CLOCK_REALTIME`, set with `TFD_TIMER_ABSTIME` at the reading's next reset: it fires at that wall-clock instant, and at once on resume when the instant passed during a suspend. The monotonic timer it replaces ran late by the length of the suspend.
+
 ## 0.3.0 — reads on events; no polling interval
 
 All five packages move to 0.3.0. Branch-only preparation, like 0.2.0.

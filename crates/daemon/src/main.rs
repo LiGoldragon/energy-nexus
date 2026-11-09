@@ -215,9 +215,11 @@ impl Reads for Daemon {
     }
 }
 /// Holds Flow's turn ends open through the translator, `Emit.TurnEnds`, and
-/// hands each to the schedule. It ends when the translator answers `Down`
-/// or the connection closes: Flow went, and Energy is restarted with Flow
-/// (its units are part of Flow's), which opens it again.
+/// hands each to the schedule. Flow going does not end it: the translator
+/// waits for Flow's socket and subscribes again, and the new opening comes
+/// on this same connection, taken as the first. It ends when the translator
+/// answers `Down` (its watch on the place is lost) or goes, and the daemon's
+/// unit is bound to the translator's.
 fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) {
     let opened = UnixStream::connect(place.emission())
         .map_err(|error| error.to_string())
@@ -251,8 +253,8 @@ fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) 
             }
             _ => {
                 eprintln!(
-                    "energy-nexus: Flow's turn ends closed; window resets and questions still \
-                     read until Energy restarts with Flow"
+                    "energy-nexus: the translator closed Flow's turn ends; window resets and \
+                     questions still read"
                 );
                 return;
             }
@@ -308,11 +310,9 @@ impl Serving for Place {
             place: self.clone(),
         }));
         // The schedule: every read Energy makes is its, on an event.
-        let schedule = Schedule::new(Daemon(Arc::clone(&nexus)), WallClock, latest);
+        let schedule = Schedule::new(Daemon(Arc::clone(&nexus)), WallClock::default(), latest);
         let events = schedule.sender();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()?;
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
         std::thread::spawn(move || runtime.block_on(schedule.run()));
         // Both sockets listen and Memory is loaded.
         if let Err(error) = Readiness::announce_ready() {

@@ -1,6 +1,6 @@
 [package]
 name="energy-nexus-translator"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace=true
 rust-version.workspace=true
 
@@ -17,7 +17,7 @@ serde_json="1"
 ureq="3"
 time={version="0.3",features=["parsing"]}
 tempfile="3"
-nix={version="0.30",features=["socket","signal"]}
+nix={version="0.30",features=["socket","signal","inotify","event"]}
 rkyv.workspace=true
 
 [dev-dependencies]
