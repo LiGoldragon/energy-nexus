@@ -8,7 +8,6 @@ The processes stay separated:
 - `energy-translator` alone holds provider API words, JSON, credentials, Datom, process calls, and reminder prose.
 - `energy-nexus` and `energy-nexus-meta` are text-only clients.
 - `energy-pace` shows both providers' usage per period, target, standing, and daily share.
-- `energy-nexus-poc` runs the separated processes together for an isolated transient deployment; a deployment runs each process as its own unit.
 
 All process-to-process traffic behind the translator is length-prefixed, validated rkyv signal. A place names an instance; its runtime and state paths are passed once when its processes start. The text clients resolve the place name below the standard XDG runtime and state roots:
 
