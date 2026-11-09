@@ -16,7 +16,7 @@ All five packages move to 0.3.1. No contract or memory change.
 
 All five packages move to 0.3.0. Branch-only preparation, like 0.2.0.
 
-**Pins.** signal-energy-nexus 0.4.0, meta-signal-energy-nexus 0.4.0 and signal-flow 57.0.0 at `8e56457`, which carries `Observe.TurnEnds`; tokio 1 in the daemon, for its schedule.
+**Pins.** signal-energy-nexus 0.4.0, meta-signal-energy-nexus 0.4.0 and signal-flow 57.0.0 at `3d0a4cd`, which carries `Observe.TurnEnds` (and `Observe.Metaflows`, which Energy does not ask); tokio 1 in the daemon, for its schedule.
 
 **Events, not an interval.** The five-minute reading loop and its `Polling` setting are gone. A provider is read when a turn ends on it (Flow's turn ends, subscribed through the translator; a burst on one provider is one read and at most one follow-up), when its window resets (one timer, set from the latest reading's next reset), and when `Read` is asked while the latest reading is older than the last turn end on it. `Read` otherwise answers from memory. `Configure.Polling.5` no longer reads.
 

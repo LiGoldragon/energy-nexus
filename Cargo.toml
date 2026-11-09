@@ -7,9 +7,9 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "3b88d6080230106ce9ddd26034427b35a61f5d62", default-features = false }
-meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "6c0022ea0793d3597c21f60ffff51916fd2421bf", default-features = false }
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "97741d2003e143662567ab8914be2dc4663a67dc", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "9f37cb71b7708daeb8d08e1a3b3509e5d6c4d1bf", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68bcd19ce774f47d11c5e69f6e10054f78de", default-features = false }
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "8e56457d41552f07df5b39a0b9e6e7248c72da43", default-features = false }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "3d0a4cdd0364a30e5586eac7db59917faca5072f", default-features = false }
 tokio = { version = "1", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
