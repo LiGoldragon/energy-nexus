@@ -189,10 +189,11 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_served() {
     assert!(report.contains("Claude Out { Psyche core Primary }"));
     let bytes = std::fs::read(shared.place.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
     match Memory::load(&shared.place.memory()).unwrap() {
         Admission::Admitted(memory) => {
             assert_eq!(memory.history().len(), 3);
-            assert_eq!(memory.configuration().polling.0, 5);
+            assert_eq!(memory.configuration().redeem_expiring.0, 720);
             assert!(memory.configuration().reminders.is_empty());
         }
         other => panic!("the upgraded memory is current, got {other:?}"),

@@ -1,8 +1,8 @@
-use energy_nexus_wire::{Envelope, Persisted, Upgrade};
+use energy_nexus_wire::{Earlier, Envelope, Persisted, Upgrade};
 use meta_signal_energy_nexus::{ProviderTarget, Set, WindowTarget};
 use signal_energy_nexus::{
-    Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus, Standing,
-    Target, Threshold,
+    Instant, Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus,
+    Standing, Target, Threshold,
 };
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -13,7 +13,6 @@ pub struct Latest {
 }
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Configuration {
-    pub polling: Minutes,
     pub thresholds: Vec<Threshold>,
     pub reminders: Vec<Reminder>,
     pub redeem_expiring: Minutes,
@@ -24,7 +23,6 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
-            polling: Minutes(5),
             thresholds: vec![
                 Threshold {
                     level: Level::Plenty,
@@ -66,7 +64,7 @@ impl Configuration {
     /// The rules `Memory::configure` enforces, kept by every memory read or
     /// written.
     fn validate(&self) -> Result<(), String> {
-        if self.polling.0 <= 0 || self.redeem_expiring.0 <= 0 {
+        if self.redeem_expiring.0 <= 0 {
             return Err("minutes must be positive".into());
         }
         if !(0..=100).contains(&self.redeem_used_at_least.0) {
@@ -84,20 +82,33 @@ impl Configuration {
     }
 }
 
-/// The daemon's Memory, `energy.rkyv`, under its envelope.
+/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 2 has
+/// no polling interval: Energy reads a provider on events. Version 1 and the
+/// archive written before the envelope are upgraded on open.
 impl Persisted for Memory {
     const ENVELOPE: Envelope = Envelope {
         magic: *b"ENXMEMRY",
-        version: 1,
+        version: 2,
     };
+    const EARLIER_VERSIONS: &'static [u32] = &[1];
     type Uncarried = unversioned::Reminder;
     fn from_archive(archive: &[u8]) -> Result<Self, String> {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
     }
-    fn upgrade(archive: &[u8]) -> Result<Upgrade<Self>, String> {
-        rkyv::from_bytes::<unversioned::Memory, rkyv::rancor::Error>(archive)
-            .map(Upgrade::from)
-            .map_err(|error| error.to_string())
+    fn upgrade(earlier: Earlier, archive: &[u8]) -> Result<Upgrade<Self>, String> {
+        match earlier {
+            Earlier::Unenveloped => {
+                rkyv::from_bytes::<unversioned::Memory, rkyv::rancor::Error>(archive)
+                    .map(Upgrade::from)
+                    .map_err(|error| error.to_string())
+            }
+            Earlier::Version(1) => {
+                rkyv::from_bytes::<version1::Memory, rkyv::rancor::Error>(archive)
+                    .map(Upgrade::from)
+                    .map_err(|error| error.to_string())
+            }
+            Earlier::Version(version) => Err(format!("no layout of format version {version}")),
+        }
     }
     fn to_archive(&self) -> Result<rkyv::util::AlignedVec, String> {
         rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())
@@ -113,7 +124,8 @@ impl Persisted for Memory {
 /// (signal-flow 74f4dae). Flow now addresses a flow by its Model, and which
 /// model serves a layer is Flow's configuration, not Energy's; so a reminder
 /// is not carried into the current layout. It is answered, for the signals
-/// that repopulate it with a model: `Configure.Reminder`.
+/// that repopulate it with a model: `Configure.Reminder`. Its polling
+/// interval is dropped: Energy reads on events.
 pub mod unversioned {
     use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
     use signal_energy_nexus::{Level, Minutes, Percent, Provider, Reading, Threshold};
@@ -174,8 +186,9 @@ pub mod unversioned {
         }
     }
     impl From<Memory> for super::Upgrade<super::Memory> {
-        /// Every reading, level and setting is carried; every reminder is
-        /// answered as uncarried.
+        /// Every reading, level and setting is carried but the polling
+        /// interval, which is dropped; every reminder is answered as
+        /// uncarried.
         fn from(old: Memory) -> Self {
             let configuration = old.configuration;
             Self {
@@ -183,7 +196,6 @@ pub mod unversioned {
                     latest: old.latest,
                     history: old.history,
                     configuration: super::Configuration {
-                        polling: configuration.polling,
                         thresholds: configuration.thresholds,
                         reminders: Vec::new(),
                         redeem_expiring: configuration.redeem_expiring,
@@ -193,6 +205,50 @@ pub mod unversioned {
                     },
                 },
                 uncarried: configuration.reminders,
+            }
+        }
+    }
+}
+/// The layout of format version 1, written by energy-nexus 0.2.0 (4e4742e):
+/// the current layout and a polling interval. The interval is dropped on
+/// upgrade, since Energy reads on events; everything else is carried.
+pub mod version1 {
+    use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
+    use signal_energy_nexus::{Minutes, Percent, Reading, Reminder, Threshold};
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+    pub struct Memory {
+        pub latest: Vec<super::Latest>,
+        pub history: Vec<Reading>,
+        pub configuration: Configuration,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+    pub struct Configuration {
+        pub polling: Minutes,
+        pub thresholds: Vec<Threshold>,
+        pub reminders: Vec<Reminder>,
+        pub redeem_expiring: Minutes,
+        pub redeem_used_at_least: Percent,
+        pub targets: Vec<ProviderTarget>,
+        pub window_targets: Vec<WindowTarget>,
+    }
+    impl From<Memory> for super::Upgrade<super::Memory> {
+        fn from(old: Memory) -> Self {
+            let configuration = old.configuration;
+            Self {
+                memory: super::Memory {
+                    latest: old.latest,
+                    history: old.history,
+                    configuration: super::Configuration {
+                        thresholds: configuration.thresholds,
+                        reminders: configuration.reminders,
+                        redeem_expiring: configuration.redeem_expiring,
+                        redeem_used_at_least: configuration.redeem_used_at_least,
+                        targets: configuration.targets,
+                        window_targets: configuration.window_targets,
+                    },
+                },
+                uncarried: Vec::new(),
             }
         }
     }
@@ -265,6 +321,23 @@ impl Pacing for Reading {
     }
 }
 
+/// When a reading says its provider's next window resets.
+pub trait Resetting {
+    /// The soonest window reset after the reading was taken; none when no
+    /// window names a later one.
+    fn next_reset(&self) -> Option<Instant>;
+}
+impl Resetting for Reading {
+    fn next_reset(&self) -> Option<Instant> {
+        self.window_vector
+            .iter()
+            .map(|window| window.resets.0)
+            .filter(|resets| *resets > self.at.0)
+            .min()
+            .map(Instant)
+    }
+}
+
 pub trait Levelling {
     fn level(&self, configuration: &Configuration) -> Level;
 }
@@ -327,7 +400,7 @@ pub trait Configuring {
 impl Configuring for Memory {
     fn configure(&mut self, set: Set) -> Result<Set, String> {
         match &set {
-            Set::Polling(value) | Set::RedeemExpiring(value) if value.0 <= 0 => {
+            Set::RedeemExpiring(value) if value.0 <= 0 => {
                 return Err("minutes must be positive".into())
             }
             Set::RedeemUsedAtLeast(value) if !(0..=100).contains(&value.0) => {
@@ -344,7 +417,6 @@ impl Configuring for Memory {
             _ => {}
         }
         match set.clone() {
-            Set::Polling(value) => self.configuration.polling = value,
             Set::Threshold(value) => {
                 self.configuration
                     .thresholds
@@ -518,6 +590,27 @@ mod tests {
         assert!(pace.expected.0 < pace.used.0);
     }
     #[test]
+    fn the_next_reset_is_the_soonest_window_reset_after_the_reading() {
+        let mut value = reading(true, 10);
+        value.window_vector.push(Window {
+            name: Name::Session,
+            used: Percent(5),
+            resets: Instant(150),
+            duration: Minutes(300),
+        });
+        value.window_vector.push(Window {
+            name: Name::FableWeek,
+            used: Percent(5),
+            resets: Instant(0),
+            duration: Minutes(10080),
+        });
+        assert_eq!(value.next_reset(), Some(Instant(150)));
+        value.at = Instant(150);
+        assert_eq!(value.next_reset(), Some(Instant(200)), "a reset at the reading is past");
+        value.at = Instant(200);
+        assert_eq!(value.next_reset(), None);
+    }
+    #[test]
     fn window_target_overrides_provider_default() {
         let mut value = reading(true, 40);
         value.window_vector.push(Window {
@@ -598,7 +691,7 @@ mod tests {
         for broken in 0..3 {
             let mut memory = Memory::default();
             match broken {
-                0 => memory.configuration.polling = Minutes(0),
+                0 => memory.configuration.redeem_expiring = Minutes(0),
                 1 => memory.configuration.redeem_used_at_least = Percent(101),
                 _ => memory.configuration.thresholds.push(Threshold {
                     level: Level::Out,

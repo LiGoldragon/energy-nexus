@@ -140,32 +140,37 @@ checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
 name = "energy-nexus-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "energy-nexus-wire",
  "ethos-zero 19.2.0",
  "meta-signal-energy-nexus",
  "rkyv",
  "signal-energy-nexus",
+ "signal-flow",
 ]
 
 [[package]]
 name = "energy-nexus-daemon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "energy-nexus-core",
  "energy-nexus-emission",
+ "energy-nexus-translator",
  "energy-nexus-wire",
  "meta-signal-energy-nexus",
  "nix",
+ "rkyv",
  "signal",
  "signal-energy-nexus",
+ "signal-flow",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
 name = "energy-nexus-emission"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rkyv",
  "signal",
@@ -174,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-translator"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "datom-codec 0.33.0",
  "energy-nexus-emission",
@@ -194,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nix",
  "rkyv",
@@ -410,8 +415,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-energy-nexus"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=bb5fd0d50bc9e1592ab44a5651deb92810170ea9#bb5fd0d50bc9e1592ab44a5651deb92810170ea9"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=6c0022ea0793d3597c21f60ffff51916fd2421bf#6c0022ea0793d3597c21f60ffff51916fd2421bf"
 dependencies = [
  "datom-codec 0.33.0",
  "protos 0.33.0",
@@ -741,8 +746,8 @@ dependencies = [
 
 [[package]]
 name = "signal-energy-nexus"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=e24e9b05973256dee404aaefc4107d556f1afd5d#e24e9b05973256dee404aaefc4107d556f1afd5d"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=3b88d6080230106ce9ddd26034427b35a61f5d62#3b88d6080230106ce9ddd26034427b35a61f5d62"
 dependencies = [
  "datom-codec 0.33.0",
  "protos 0.33.0",
@@ -754,7 +759,7 @@ dependencies = [
 [[package]]
 name = "signal-flow"
 version = "57.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=065730ff8b628657a692e8890714cadde881f1d4#065730ff8b628657a692e8890714cadde881f1d4"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=8e56457d41552f07df5b39a0b9e6e7248c72da43#8e56457d41552f07df5b39a0b9e6e7248c72da43"
 dependencies = [
  "datom-codec 0.33.0",
  "ethos-zero 17.0.0",
@@ -878,6 +883,27 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tokio"
+version = "1.53.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+dependencies = [
+ "pin-project-lite",
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
 
 [[package]]
 name = "unicode-ident"

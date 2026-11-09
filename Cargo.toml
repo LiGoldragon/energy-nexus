@@ -7,7 +7,9 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "e24e9b05973256dee404aaefc4107d556f1afd5d", default-features = false }
-meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "bb5fd0d50bc9e1592ab44a5651deb92810170ea9", default-features = false }
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "3b88d6080230106ce9ddd26034427b35a61f5d62", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "6c0022ea0793d3597c21f60ffff51916fd2421bf", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68bcd19ce774f47d11c5e69f6e10054f78de", default-features = false }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "8e56457d41552f07df5b39a0b9e6e7248c72da43", default-features = false }
+tokio = { version = "1", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }

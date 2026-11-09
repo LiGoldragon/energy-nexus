@@ -1,8 +1,9 @@
 //! Energy's memory files on disk. Each is an envelope, then one rkyv
 //! archive: eight bytes naming the kind of file, the format version (u32,
 //! little-endian) and the archive's length (u64, little-endian). A file
-//! without the envelope was written before the envelope existed; its owner
-//! reads it in that earlier layout and upgrades it on open.
+//! without the envelope was written before the envelope existed, and an
+//! envelope of an earlier version holds an earlier layout; its owner reads
+//! either in that layout and upgrades it on open.
 use std::path::{Path, PathBuf};
 
 /// The envelope of one kind of memory file: the bytes that open it and the
@@ -75,6 +76,22 @@ impl std::fmt::Display for MemoryRefusal {
 }
 impl std::error::Error for MemoryRefusal {}
 
+/// The earlier layout an archive was read in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Earlier {
+    /// Written before the envelope existed.
+    Unenveloped,
+    /// An envelope of this earlier format version.
+    Version(u32),
+}
+impl std::fmt::Display for Earlier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unenveloped => write!(formatter, "the archive written before the envelope"),
+            Self::Version(version) => write!(formatter, "format version {version}"),
+        }
+    }
+}
 /// What a memory path held.
 #[derive(Debug)]
 pub enum Admission<M: Persisted> {
@@ -82,9 +99,9 @@ pub enum Admission<M: Persisted> {
     Absent,
     /// A current envelope around a valid archive.
     Admitted(M),
-    /// An archive of the layout written before the envelope, read in that
-    /// layout and carried into this one.
-    Upgraded(Upgrade<M>),
+    /// An archive of an earlier layout, read in that layout and carried
+    /// into this one.
+    Upgraded(Earlier, Upgrade<M>),
 }
 /// The memory an earlier archive upgrades to, and what of it has no place
 /// in this layout.
@@ -106,23 +123,25 @@ impl<M: Persisted + Default> From<Admission<M>> for Upgrade<M> {
                 memory,
                 uncarried: Vec::new(),
             },
-            Admission::Upgraded(upgrade) => upgrade,
+            Admission::Upgraded(_, upgrade) => upgrade,
         }
     }
 }
 
 /// A memory kept in one file under an envelope. The kind supplies its
-/// envelope, its archive in both layouts and its rules; reading, the
-/// upgrade on open and the write are the defaults here.
+/// envelope, its archive in the current and every earlier layout and its
+/// rules; reading, the upgrade on open and the write are the defaults here.
 pub trait Persisted: Sized {
     const ENVELOPE: Envelope;
+    /// The earlier envelope versions this kind upgrades on open.
+    const EARLIER_VERSIONS: &'static [u32] = &[];
     /// What an earlier archive held that this layout has no place for.
     type Uncarried: std::fmt::Display + std::fmt::Debug;
     /// A current archive; the bytes are aligned to 16.
     fn from_archive(archive: &[u8]) -> Result<Self, String>;
-    /// An archive of the layout written before the envelope; the bytes are
-    /// aligned to 16.
-    fn upgrade(archive: &[u8]) -> Result<Upgrade<Self>, String>;
+    /// An archive of an earlier layout: the one written before the envelope,
+    /// or one of `EARLIER_VERSIONS`; the bytes are aligned to 16.
+    fn upgrade(earlier: Earlier, archive: &[u8]) -> Result<Upgrade<Self>, String>;
     fn to_archive(&self) -> Result<rkyv::util::AlignedVec, String>;
     /// The rules the content keeps, checked on every read and before every
     /// write, so a file this build writes is one it reads.
@@ -157,18 +176,21 @@ pub trait Persisted: Sized {
         let mut aligned = rkyv::util::AlignedVec::<16>::new();
         if !bytes.starts_with(magic) {
             aligned.extend_from_slice(&bytes);
-            let upgrade = Self::upgrade(&aligned).map_err(|_| MemoryRefusal::Unrecognized {
-                path: path.to_owned(),
-                bytes: bytes.len() as u64,
+            let upgrade = Self::upgrade(Earlier::Unenveloped, &aligned).map_err(|_| {
+                MemoryRefusal::Unrecognized {
+                    path: path.to_owned(),
+                    bytes: bytes.len() as u64,
+                }
             })?;
             upgrade.memory.validate().map_err(payload)?;
-            return Ok(Admission::Upgraded(upgrade));
+            return Ok(Admission::Upgraded(Earlier::Unenveloped, upgrade));
         }
         if bytes.len() < HEADER {
             return Err(truncated(bytes.len()));
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().expect("four bytes"));
-        if version != Self::ENVELOPE.version {
+        let current = version == Self::ENVELOPE.version;
+        if !current && !Self::EARLIER_VERSIONS.contains(&version) {
             return Err(MemoryRefusal::UnsupportedVersion {
                 path: path.to_owned(),
                 found: version,
@@ -180,6 +202,12 @@ pub trait Persisted: Sized {
             return Err(truncated(bytes.len()));
         }
         aligned.extend_from_slice(&bytes[HEADER..]);
+        if !current {
+            let earlier = Earlier::Version(version);
+            let upgrade = Self::upgrade(earlier, &aligned).map_err(payload)?;
+            upgrade.memory.validate().map_err(payload)?;
+            return Ok(Admission::Upgraded(earlier, upgrade));
+        }
         let memory = Self::from_archive(&aligned).map_err(payload)?;
         memory.validate().map_err(payload)?;
         Ok(Admission::Admitted(memory))
@@ -189,7 +217,7 @@ pub trait Persisted: Sized {
     /// when that write fails. Nothing is written for an absent entry.
     fn load(path: &Path) -> Result<Admission<Self>, MemoryRefusal> {
         let admission = Self::admit(path)?;
-        if let Admission::Upgraded(upgrade) = &admission {
+        if let Admission::Upgraded(_, upgrade) = &admission {
             upgrade.memory.save(path)?;
         }
         Ok(admission)

@@ -1,6 +1,6 @@
 [package]
 name="energy-nexus-daemon"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace=true
 rust-version.workspace=true
 
@@ -11,7 +11,12 @@ energy-nexus-wire={path="../wire"}
 signal-energy-nexus.workspace=true
 meta-signal-energy-nexus.workspace=true
 signal.workspace=true
+tokio={workspace=true,features=["rt","time","sync","macros"]}
 
 [dev-dependencies]
+energy-nexus-translator={path="../translator"}
+signal-flow.workspace=true
+rkyv.workspace=true
 nix={version="0.30",features=["signal"]}
 tempfile="3"
+tokio={workspace=true,features=["rt","time","sync","macros","test-util"]}

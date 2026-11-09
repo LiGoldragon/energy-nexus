@@ -1,11 +1,12 @@
 //! Memory is read through its envelope. Only a missing entry makes a memory
-//! new; the archive written before the envelope is upgraded on open; a
-//! damaged or foreign file is refused and left as it is.
+//! new; the archive written before the envelope and an envelope of format
+//! version 1 are upgraded on open; a damaged or foreign file is refused and
+//! left as it is.
 
 use std::path::{Path, PathBuf};
 
-use energy_nexus_core::{unversioned, Configuring, Memory, Remembering};
-use energy_nexus_wire::{Admission, MemoryRefusal, Persisted};
+use energy_nexus_core::{unversioned, version1, Configuring, Memory, Remembering};
+use energy_nexus_wire::{Admission, Earlier, MemoryRefusal, Persisted};
 use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
 use signal_energy_nexus::{Instant, Level, Minutes, Name, Percent, Provider, Target, Threshold};
 
@@ -90,7 +91,7 @@ fn refused(root: &Root, bytes: &[u8]) -> MemoryRefusal {
 fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<unversioned::Reminder>) {
     std::fs::write(root.memory(), bytes).expect("seed");
     match Memory::load(&root.memory()).expect("the unversioned archive opens") {
-        Admission::Upgraded(upgrade) => (upgrade.memory, upgrade.uncarried),
+        Admission::Upgraded(Earlier::Unenveloped, upgrade) => (upgrade.memory, upgrade.uncarried),
         other => panic!("an unversioned archive is upgraded, got {other:?}"),
     }
 }
@@ -99,7 +100,7 @@ fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<unversioned::Reminder>) {
 fn written_in_the_envelope(root: &Root, memory: &Memory) {
     let bytes = std::fs::read(root.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
     match Memory::load(&root.memory()).unwrap() {
         Admission::Admitted(reopened) => {
             assert_eq!(reopened.configuration(), memory.configuration());
@@ -128,9 +129,6 @@ fn the_archive_written_before_the_envelope_is_upgraded_for_every_layer() {
         let bytes = old_archive(index);
         assert_eq!(bytes.len(), 142);
         assert_eq!(bytes[49], index as u8, "the Layer discriminant");
-        // The current layout would take these bytes too, reading the Layer
-        // as a Model; the missing envelope is what says they are older.
-        assert!(rkyv::from_bytes::<Memory, rkyv::rancor::Error>(&bytes).is_ok());
         let (memory, uncarried) = upgraded(&root, &bytes);
         assert!(memory.configuration().reminders.is_empty());
         assert_eq!(uncarried.len(), 1);
@@ -148,8 +146,8 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
     let root = Root::new("full");
     assert_eq!(OLD_FULL.len(), 617);
     let (memory, uncarried) = upgraded(&root, OLD_FULL);
+    // Its Polling 5 is dropped: the current layout has no interval.
     let configuration = memory.configuration();
-    assert_eq!(configuration.polling, Minutes(5));
     assert!(configuration.thresholds.contains(&Threshold {
         level: Level::Fair,
         left: Percent(25)
@@ -294,12 +292,14 @@ fn an_entry_that_cannot_be_read_is_refused_and_a_link_is_read_through() {
     let target = root.0.join("elsewhere.rkyv");
     let mut memory = Memory::default();
     memory
-        .configure(meta_signal_energy_nexus::Set::Polling(Minutes(9)))
+        .configure(meta_signal_energy_nexus::Set::RedeemExpiring(Minutes(9)))
         .unwrap();
     memory.save(&target).unwrap();
     std::os::unix::fs::symlink(&target, root.memory()).expect("link to a memory");
     match Memory::load(&root.memory()).unwrap() {
-        Admission::Admitted(read) => assert_eq!(read.configuration().polling, Minutes(9)),
+        Admission::Admitted(read) => {
+            assert_eq!(read.configuration().redeem_expiring, Minutes(9))
+        }
         other => panic!("a link to a memory is read through, got {other:?}"),
     }
     std::fs::remove_file(root.memory()).unwrap();
@@ -353,4 +353,64 @@ fn the_current_envelope_round_trips_and_a_failed_save_changes_nothing() {
         before,
         "a failed save leaves the target unchanged"
     );
+}
+
+/// A memory energy-nexus 0.2.0 wrote, format version 1, holding a polling
+/// interval of 7 minutes beside every other setting.
+fn version_one_file() -> Vec<u8> {
+    use signal_energy_nexus::{Address, Recipient, Reminder};
+    let old = version1::Memory {
+        latest: Vec::new(),
+        history: Vec::new(),
+        configuration: version1::Configuration {
+            polling: Minutes(7),
+            thresholds: vec![Threshold {
+                level: Level::Fair,
+                left: Percent(30),
+            }],
+            reminders: vec![Reminder {
+                provider: Provider::Codex,
+                level: Level::Low,
+                recipient: Recipient(Address {
+                    aspect: signal_flow::Aspect::Mind,
+                    topic: "energyNexus".into(),
+                    model: signal_flow::Model::Sol,
+                }),
+            }],
+            redeem_expiring: Minutes(600),
+            redeem_used_at_least: Percent(2),
+            targets: Vec::new(),
+            window_targets: Vec::new(),
+        },
+    };
+    let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&old).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ENXMEMRY");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(archive.as_slice());
+    bytes
+}
+
+#[test]
+fn a_stored_polling_interval_is_dropped_by_the_upgrade() {
+    let root = Root::new("version-one");
+    std::fs::write(root.memory(), version_one_file()).unwrap();
+    let memory = match Memory::load(&root.memory()).expect("format version 1 opens") {
+        Admission::Upgraded(Earlier::Version(1), upgrade) => {
+            assert!(upgrade.uncarried.is_empty(), "a model-addressed reminder is carried");
+            upgrade.memory
+        }
+        other => panic!("format version 1 is upgraded, got {other:?}"),
+    };
+    let configuration = memory.configuration();
+    assert_eq!(configuration.redeem_expiring, Minutes(600));
+    assert_eq!(configuration.redeem_used_at_least, Percent(2));
+    assert!(configuration.thresholds.contains(&Threshold {
+        level: Level::Fair,
+        left: Percent(30)
+    }));
+    assert_eq!(configuration.reminders.len(), 1);
+    // Written as version 2, which has no interval, and read back as it is.
+    written_in_the_envelope(&root, &memory);
 }

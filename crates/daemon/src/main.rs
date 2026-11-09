@@ -1,3 +1,5 @@
+mod schedule;
+
 use energy_nexus_core::{
     Configuring, LevelChange, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering,
     Reminding,
@@ -5,7 +7,9 @@ use energy_nexus_core::{
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
     Outcome as ExternalOutcome, Query as EmissionQuery, Response as EmissionResponse, Send,
+    TurnEnds,
 };
+use schedule::{Event, Reads, Schedule, WallClock};
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
     OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
@@ -128,16 +132,21 @@ impl Nexus {
     }
 }
 trait Answering {
-    fn answer(&mut self, call: Call) -> Response;
+    /// Reads the provider now: levels the reading, pushes a level change and
+    /// sends its reminders. Only the schedule asks for it.
     fn read(&mut self, provider: Provider) -> Response;
+    /// The latest reading in memory, with its pace.
+    fn recall(&self, provider: Provider) -> Response;
     fn redeem(&mut self, provider: Provider) -> Response;
 }
 impl Answering for Nexus {
-    fn answer(&mut self, call: Call) -> Response {
-        match call.input {
-            Query::Read(provider) => self.read(provider),
-            Query::Subscribe => Response::Subscribed,
-            Query::Redeem(provider) => self.redeem(provider),
+    fn recall(&self, provider: Provider) -> Response {
+        match self.memory.latest(&provider) {
+            Some(latest) => Response::Read(Read_Data {
+                pace_vector: latest.reading.pace(self.memory.configuration()),
+                reading: latest.reading.clone(),
+            }),
+            None => Response::Refused(Refused::ProviderDown(provider)),
         }
     }
     fn read(&mut self, provider: Provider) -> Response {
@@ -179,6 +188,80 @@ impl Answering for Nexus {
         }
     }
 }
+/// The schedule's reads and answers, made on the Nexus off the schedule's
+/// thread: a provider call blocks.
+#[derive(Clone)]
+struct Daemon(Arc<Mutex<Nexus>>);
+impl Reads for Daemon {
+    async fn read(&self, provider: Provider) -> Response {
+        let nexus = Arc::clone(&self.0);
+        let down = Response::Refused(Refused::ProviderDown(provider.clone()));
+        tokio::task::spawn_blocking(move || match nexus.lock() {
+            Ok(mut nexus) => nexus.read(provider),
+            Err(_) => Response::Refused(Refused::ProviderDown(provider)),
+        })
+        .await
+        .unwrap_or(down)
+    }
+    async fn recall(&self, provider: Provider) -> Response {
+        let nexus = Arc::clone(&self.0);
+        let down = Response::Refused(Refused::ProviderDown(provider.clone()));
+        tokio::task::spawn_blocking(move || match nexus.lock() {
+            Ok(nexus) => nexus.recall(provider),
+            Err(_) => Response::Refused(Refused::ProviderDown(provider)),
+        })
+        .await
+        .unwrap_or(down)
+    }
+}
+/// Holds Flow's turn ends open through the translator, `Emit.TurnEnds`, and
+/// hands each to the schedule. It ends when the translator answers `Down`
+/// or the connection closes: Flow went, and Energy is restarted with Flow
+/// (its units are part of Flow's), which opens it again.
+fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) {
+    let opened = UnixStream::connect(place.emission())
+        .map_err(|error| error.to_string())
+        .and_then(|mut stream| {
+            let signal = EmissionQuery::Emit(Emission::TurnEnds(TurnEnds))
+                .signalize()
+                .map_err(|error| format!("{error:?}"))?;
+            stream
+                .write_frame(signal.bytes())
+                .map_err(|error| error.to_string())?;
+            Ok(stream)
+        });
+    let mut stream = match opened {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("energy-nexus: turn ends not subscribed, the translator is unreachable: {error}");
+            return;
+        }
+    };
+    loop {
+        let event = stream
+            .read_frame()
+            .ok()
+            .and_then(|bytes| Signal::<EmissionResponse>::from(bytes).restore().ok());
+        let event = match event {
+            Some(EmissionResponse::Emitted(ExternalOutcome::TurnEndsObserved(ends))) => {
+                Event::TurnEndsObserved(ends)
+            }
+            Some(EmissionResponse::Emitted(ExternalOutcome::TurnEnded(end))) => {
+                Event::TurnEnded(end)
+            }
+            _ => {
+                eprintln!(
+                    "energy-nexus: Flow's turn ends closed; window resets and questions still \
+                     read until Energy restarts with Flow"
+                );
+                return;
+            }
+        };
+        if events.send(event).is_err() {
+            return;
+        }
+    }
+}
 fn push(subscribers: &mut Vec<UnixStream>, response: &Response) {
     let Ok(signal) = response.signalize() else {
         return;
@@ -196,14 +279,10 @@ impl Serving for Place {
         let admission = Memory::load(&path).map_err(|refusal| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, refusal.to_string())
         })?;
-        let upgraded = matches!(admission, energy_nexus_wire::Admission::Upgraded(_));
-        let Upgrade { memory, uncarried } = Upgrade::from(admission);
-        if upgraded {
-            eprintln!(
-                "energy-nexus: {} upgraded from the archive written before the envelope",
-                path.display()
-            );
+        if let energy_nexus_wire::Admission::Upgraded(earlier, _) = &admission {
+            eprintln!("energy-nexus: {} upgraded from {earlier}", path.display());
         }
+        let Upgrade { memory, uncarried } = Upgrade::from(admission);
         for reminder in &uncarried {
             let address = &reminder.recipient.0;
             eprintln!(
@@ -218,33 +297,34 @@ impl Serving for Place {
         own.remove();
         let public = UnixListener::bind(self.public())?;
         let meta = UnixListener::bind(self.meta())?;
+        let latest = [Provider::Claude, Provider::Codex]
+            .iter()
+            .filter_map(|provider| memory.latest(provider))
+            .map(|latest| latest.reading.clone())
+            .collect();
         let nexus = Arc::new(Mutex::new(Nexus {
             memory,
             subscribers: Vec::new(),
             place: self.clone(),
         }));
-        // Both sockets listen and Memory is loaded: a unit ordered after
-        // this one (the translator) finds the daemon serving.
+        // The schedule: every read Energy makes is its, on an event.
+        let schedule = Schedule::new(Daemon(Arc::clone(&nexus)), WallClock, latest);
+        let events = schedule.sender();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        std::thread::spawn(move || runtime.block_on(schedule.run()));
+        // Both sockets listen and Memory is loaded.
         if let Err(error) = Readiness::announce_ready() {
             eprintln!("readiness not announced: {error}");
         }
+        // The translator's unit is ordered before this one: its readiness
+        // came first, so the subscription finds it, and its opening, the
+        // last turn end on each provider, is the first reading's event.
         {
-            let nexus = Arc::clone(&nexus);
-            std::thread::spawn(move || loop {
-                let minutes = nexus
-                    .lock()
-                    .ok()
-                    .map(|guard| guard.memory.configuration().polling.0)
-                    .unwrap_or(5)
-                    .max(1);
-                if let Ok(mut guard) = nexus.lock() {
-                    let _ = guard.read(Provider::Claude);
-                    let _ = guard.read(Provider::Codex);
-                }
-                std::thread::sleep(std::time::Duration::from_secs(
-                    (minutes as u64).saturating_mul(60),
-                ));
-            });
+            let place = self.clone();
+            let events = events.clone();
+            std::thread::spawn(move || subscribe(&place, &events));
         }
         {
             let nexus = Arc::clone(&nexus);
@@ -257,12 +337,17 @@ impl Serving for Place {
         }
         for stream in public.incoming().flatten() {
             let nexus = Arc::clone(&nexus);
-            std::thread::spawn(move || serve_public(stream, nexus));
+            let events = events.clone();
+            std::thread::spawn(move || serve_public(stream, nexus, events));
         }
         Ok(())
     }
 }
-fn serve_public(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
+fn serve_public(
+    mut stream: UnixStream,
+    nexus: Arc<Mutex<Nexus>>,
+    events: tokio::sync::mpsc::UnboundedSender<Event>,
+) {
     let Ok(bytes) = stream.read_frame() else {
         return;
     };
@@ -270,7 +355,13 @@ fn serve_public(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
         return;
     };
     let subscribe = matches!(call.input, Query::Subscribe);
-    let response = nexus.lock().ok().map(|mut n| n.answer(call));
+    let response = match call.input {
+        // The question: answered by the schedule, which reads first when the
+        // latest reading is older than the last turn end on the provider.
+        Query::Read(provider) => Some(schedule::ask(&events, provider)),
+        Query::Subscribe => Some(Response::Subscribed),
+        Query::Redeem(provider) => nexus.lock().ok().map(|mut n| n.redeem(provider)),
+    };
     if let Some(response) = response {
         if let Ok(signal) = response.signalize() {
             if stream.write_frame(signal.bytes()).is_ok() && subscribe {

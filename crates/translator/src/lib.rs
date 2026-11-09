@@ -1,18 +1,18 @@
 use datom_codec::{Actualizing, Potential};
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Emittable, Outcome,
-    Query as EmissionQuery, Response as EmissionResponse, Send,
+    Query as EmissionQuery, Response as EmissionResponse, Send, TurnEnd,
 };
 use energy_nexus_wire::{
-    AnnouncesReadiness, Declared, Envelope, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
-    OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
+    AnnouncesReadiness, Declared, Earlier, Envelope, Framing, MemoryPathing, MemoryRefusal,
+    OwnedSockets, OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
 };
 use serde_json::{json, Value};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{
     Instant, Level, Minutes, Name, Percent, Provider, Reading, Reset, ResetId, ResetStatus, Window,
 };
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -34,11 +34,14 @@ impl Persisted for Programs {
     fn from_archive(archive: &[u8]) -> Result<Self, String> {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
     }
-    fn upgrade(archive: &[u8]) -> Result<Upgrade<Self>, String> {
-        Self::from_archive(archive).map(|memory| Upgrade {
-            memory,
-            uncarried: Vec::new(),
-        })
+    fn upgrade(earlier: Earlier, archive: &[u8]) -> Result<Upgrade<Self>, String> {
+        match earlier {
+            Earlier::Unenveloped => Self::from_archive(archive).map(|memory| Upgrade {
+                memory,
+                uncarried: Vec::new(),
+            }),
+            Earlier::Version(version) => Err(format!("no layout of format version {version}")),
+        }
     }
     fn to_archive(&self) -> Result<rkyv::util::AlignedVec, String> {
         rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|error| error.to_string())
@@ -53,8 +56,21 @@ pub struct Translator {
     pub programs: Arc<Mutex<Programs>>,
 }
 pub trait Translating {
+    /// One external call: every emission but `TurnEnds`, which is held open
+    /// (`relay_turn_ends`).
     fn emit(&self, emission: Emission) -> Outcome;
+    /// Takes its sockets at its place, announces readiness and serves.
     fn serve(&self) -> std::io::Result<()>;
+    /// Binds the three sockets, removing a stale one of its own first; they
+    /// listen once this returns.
+    fn bind(&self) -> std::io::Result<Listening>;
+}
+/// The translator's three sockets, listening.
+pub struct Listening {
+    translator: Translator,
+    public: UnixListener,
+    meta: UnixListener,
+    emission: UnixListener,
 }
 impl Translating for Translator {
     fn emit(&self, emission: Emission) -> Outcome {
@@ -63,33 +79,49 @@ impl Translating for Translator {
             Emission::CodexConsumeReset(value) => value.emit(self),
             Emission::ClaudeUsage(value) => value.emit(self),
             Emission::Send(value) => value.emit(self),
+            Emission::TurnEnds(_) => Outcome::Down,
         }
     }
     fn serve(&self) -> std::io::Result<()> {
         self.place.confirm()?;
-        let own = OwnedSockets(vec![
-            self.place.public_translator(),
-            self.place.meta_translator(),
-            self.place.emission(),
-        ]);
-        own.remove_at_stop()?;
-        own.remove();
-        let public = UnixListener::bind(self.place.public_translator())?;
-        let meta = UnixListener::bind(self.place.meta_translator())?;
-        let emission = UnixListener::bind(self.place.emission())?;
+        OwnedSockets(self.own()).remove_at_stop()?;
+        let listening = self.bind()?;
         // All three sockets listen: the clients and the daemon find the
         // translator serving.
         if let Err(error) = Readiness::announce_ready() {
             eprintln!("readiness not announced: {error}");
         }
-        let this = self.clone();
+        listening.run();
+        Ok(())
+    }
+    fn bind(&self) -> std::io::Result<Listening> {
+        OwnedSockets(self.own()).remove();
+        Ok(Listening {
+            translator: self.clone(),
+            public: UnixListener::bind(self.place.public_translator())?,
+            meta: UnixListener::bind(self.place.meta_translator())?,
+            emission: UnixListener::bind(self.place.emission())?,
+        })
+    }
+}
+impl Listening {
+    /// Serves every connection on its own thread; returns only when the
+    /// public socket stops accepting.
+    pub fn run(self) {
+        let Self {
+            translator,
+            public,
+            meta,
+            emission,
+        } = self;
+        let this = translator.clone();
         std::thread::spawn(move || {
             for stream in emission.incoming().flatten() {
                 let this = this.clone();
                 std::thread::spawn(move || this.serve_emission(stream));
             }
         });
-        let this = self.clone();
+        let this = translator.clone();
         std::thread::spawn(move || {
             for stream in meta.incoming().flatten() {
                 let this = this.clone();
@@ -97,10 +129,59 @@ impl Translating for Translator {
             }
         });
         for stream in public.incoming().flatten() {
-            let this = self.clone();
+            let this = translator.clone();
             std::thread::spawn(move || this.serve_public(stream));
         }
-        Ok(())
+    }
+}
+/// Flow's frames: a four-byte big-endian length, then the rkyv archive.
+trait FlowFraming {
+    fn write_flow_frame(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+    fn read_flow_frame(&mut self) -> std::io::Result<Vec<u8>>;
+}
+impl<T: Read + Write> FlowFraming for T {
+    fn write_flow_frame(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let length = u32::try_from(bytes.len())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too large"))?;
+        self.write_all(&length.to_be_bytes())?;
+        self.write_all(bytes)?;
+        self.flush()
+    }
+    fn read_flow_frame(&mut self) -> std::io::Result<Vec<u8>> {
+        let mut head = [0u8; 4];
+        self.read_exact(&mut head)?;
+        let size = u32::from_be_bytes(head) as usize;
+        if size > energy_nexus_wire::CAPACITY {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
+        }
+        let mut bytes = vec![0; size];
+        self.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+/// A Flow turn end in Energy's words: the provider its harness spends.
+/// The harness settles the provider: a Claude harness spends the Claude
+/// account and a Codex harness the Codex account, whichever model runs in it.
+pub fn turn_end(flow: &signal_flow::TurnEnd) -> TurnEnd {
+    TurnEnd {
+        provider: match flow.harness_kind {
+            signal_flow::HarnessKind::Claude => Provider::Claude,
+            signal_flow::HarnessKind::Codex => Provider::Codex,
+        },
+        at: Instant(flow.observed_at),
+    }
+}
+/// What one frame from Flow's turn-end subscription says, for the daemon.
+fn turn_end_outcome(frame: &[u8]) -> Outcome {
+    match rkyv::from_bytes::<signal_flow::Response, rkyv::rancor::Error>(frame) {
+        Ok(signal_flow::Response::TurnEndsObserved(ends)) => {
+            Outcome::TurnEndsObserved(ends.iter().map(turn_end).collect())
+        }
+        Ok(signal_flow::Response::TurnEnded(end)) => Outcome::TurnEnded(turn_end(&end)),
+        _ => Outcome::Down,
     }
 }
 pub trait CodexCalling {
@@ -203,13 +284,80 @@ impl Emittable<Translator> for Send {
     }
 }
 impl Translator {
+    fn own(&self) -> Vec<std::path::PathBuf> {
+        vec![
+            self.place.public_translator(),
+            self.place.meta_translator(),
+            self.place.emission(),
+        ]
+    }
+    /// The Flow Nexus at the same place: its ordinary socket.
+    pub fn flow_socket(&self) -> std::path::PathBuf {
+        self.place.runtime.join("flow.sock")
+    }
+    /// Holds the daemon's `TurnEnds` open: subscribes to Flow's turn ends at
+    /// the place and hands each frame on as an Outcome, in Energy's words.
+    /// Ends with `Down` when Flow cannot be reached, closes or answers
+    /// otherwise; when the daemon goes, the Flow connection is closed.
+    fn relay_turn_ends(&self, mut daemon: UnixStream) {
+        let send = |daemon: &mut UnixStream, outcome: Outcome| {
+            EmissionResponse::Emitted(outcome)
+                .signalize()
+                .map_err(|error| format!("{error:?}"))
+                .and_then(|signal| {
+                    daemon
+                        .write_frame(signal.bytes())
+                        .map_err(|error| error.to_string())
+                })
+        };
+        let query = signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds);
+        let subscribed = UnixStream::connect(self.flow_socket()).and_then(|mut flow| {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            flow.write_flow_frame(&bytes)?;
+            Ok(flow)
+        });
+        let mut flow = match subscribed {
+            Ok(flow) => flow,
+            Err(error) => {
+                eprintln!(
+                    "energy-translator: Flow at {} not subscribed: {error}",
+                    self.flow_socket().display()
+                );
+                let _ = send(&mut daemon, Outcome::Down);
+                return;
+            }
+        };
+        // The daemon sends nothing more on this connection: its end is the
+        // daemon gone, and the Flow subscription is closed with it.
+        if let (Ok(mut watched), Ok(closing)) = (daemon.try_clone(), flow.try_clone()) {
+            std::thread::spawn(move || {
+                let mut byte = [0u8; 1];
+                while matches!(watched.read(&mut byte), Ok(read) if read > 0) {}
+                let _ = closing.shutdown(std::net::Shutdown::Both);
+            });
+        }
+        loop {
+            let outcome = match flow.read_flow_frame() {
+                Ok(frame) => turn_end_outcome(&frame),
+                Err(error) => {
+                    eprintln!("energy-translator: Flow's turn ends closed: {error}");
+                    Outcome::Down
+                }
+            };
+            let down = matches!(outcome, Outcome::Down);
+            if send(&mut daemon, outcome).is_err() || down {
+                return;
+            }
+        }
+    }
     /// The translator process at its place, with its memory: an archive
     /// written before the envelope is upgraded on open, and a memory that
     /// cannot be read keeps the translator from starting.
     pub fn open(place: Place) -> Result<Self, MemoryRefusal> {
         let path = place.translator_memory();
         let admission = Programs::load(&path)?;
-        if matches!(admission, energy_nexus_wire::Admission::Upgraded(_)) {
+        if matches!(admission, energy_nexus_wire::Admission::Upgraded(..)) {
             eprintln!(
                 "energy-translator: {} upgraded from the archive written before the envelope",
                 path.display()
@@ -263,6 +411,9 @@ impl Translator {
         else {
             return;
         };
+        if matches!(emission, Emission::TurnEnds(_)) {
+            return self.relay_turn_ends(stream);
+        }
         if let Ok(signal) = EmissionResponse::Emitted(self.emit(emission)).signalize() {
             let _ = stream.write_frame(signal.bytes());
         }
@@ -711,9 +862,9 @@ sleep 60
     #[test]
     fn meta_query_text_fixture() {
         let query = meta_signal_energy_nexus::Query::Configure(
-            meta_signal_energy_nexus::Set::Polling(Minutes(5)),
+            meta_signal_energy_nexus::Set::RedeemExpiring(Minutes(720)),
         );
-        assert_eq!(encode(&query), "Configure.Polling.5");
+        assert_eq!(encode(&query), "Configure.RedeemExpiring.720");
     }
     #[test]
     fn meta_query_text_reads_the_bare_minutes_and_refuses_the_braced_form() {
@@ -721,14 +872,73 @@ sleep 60
         let read = |text: &str| {
             Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
         };
-        let bare = read("Configure.Polling.5").expect("the bare form reads");
+        let bare = read("Configure.RedeemExpiring.720").expect("the bare form reads");
         assert_eq!(
             bare,
-            meta_signal_energy_nexus::Query::Configure(meta_signal_energy_nexus::Set::Polling(
-                Minutes(5)
-            ))
+            meta_signal_energy_nexus::Query::Configure(
+                meta_signal_energy_nexus::Set::RedeemExpiring(Minutes(720))
+            )
         );
-        assert!(read("Configure.Polling.{ 5 }").is_err());
+        assert!(read("Configure.RedeemExpiring.{ 720 }").is_err());
+    }
+    #[test]
+    fn the_polling_interval_no_longer_reads_at_the_meta_command() {
+        use datom_codec::{Actualizing, Potential};
+        let read = |text: &str| {
+            Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
+        };
+        assert!(read("Configure.Polling.5").is_err());
+    }
+    fn flow_turn_end(harness_kind: signal_flow::HarnessKind, model: signal_flow::Model) -> signal_flow::TurnEnd {
+        signal_flow::TurnEnd {
+            address: signal_flow::Address {
+                aspect: signal_flow::Aspect::Psyche,
+                topic: "core".into(),
+                model,
+            },
+            harness_kind,
+            flow_id: "ff3882".into(),
+            observed_at: 1_762_210_000,
+        }
+    }
+    #[test]
+    fn a_flow_turn_end_maps_to_the_provider_its_harness_spends() {
+        use signal_flow::{HarnessKind, Model};
+        for (harness, model, provider) in [
+            (HarnessKind::Claude, Model::Opus, Provider::Claude),
+            (HarnessKind::Claude, Model::Fable, Provider::Claude),
+            (HarnessKind::Codex, Model::Sol, Provider::Codex),
+            (HarnessKind::Codex, Model::Luna, Provider::Codex),
+        ] {
+            assert_eq!(
+                turn_end(&flow_turn_end(harness, model)),
+                TurnEnd {
+                    provider,
+                    at: Instant(1_762_210_000)
+                }
+            );
+        }
+    }
+    #[test]
+    fn flow_turn_end_frames_become_energy_outcomes() {
+        use signal_flow::{HarnessKind, Model, Response};
+        let frame = |response: &Response| {
+            rkyv::to_bytes::<rkyv::rancor::Error>(response).unwrap().to_vec()
+        };
+        let claude = flow_turn_end(HarnessKind::Claude, Model::Opus);
+        let codex = flow_turn_end(HarnessKind::Codex, Model::Sol);
+        assert_eq!(
+            turn_end_outcome(&frame(&Response::TurnEndsObserved(vec![
+                claude.clone(),
+                codex.clone()
+            ]))),
+            Outcome::TurnEndsObserved(vec![turn_end(&claude), turn_end(&codex)])
+        );
+        assert_eq!(
+            turn_end_outcome(&frame(&Response::TurnEnded(codex.clone()))),
+            Outcome::TurnEnded(turn_end(&codex))
+        );
+        assert_eq!(turn_end_outcome(b"not a frame"), Outcome::Down);
     }
     fn reminder_query() -> meta_signal_energy_nexus::Query {
         meta_signal_energy_nexus::Query::Configure(

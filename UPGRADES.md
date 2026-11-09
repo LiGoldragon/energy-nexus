@@ -1,5 +1,19 @@
 # Upgrades
 
+## 0.3.0 — reads on events; no polling interval
+
+All five packages move to 0.3.0. Branch-only preparation, like 0.2.0.
+
+**Pins.** signal-energy-nexus 0.4.0, meta-signal-energy-nexus 0.4.0 and signal-flow 57.0.0 at `8e56457`, which carries `Observe.TurnEnds`; tokio 1 in the daemon, for its schedule.
+
+**Events, not an interval.** The five-minute reading loop and its `Polling` setting are gone. A provider is read when a turn ends on it (Flow's turn ends, subscribed through the translator; a burst on one provider is one read and at most one follow-up), when its window resets (one timer, set from the latest reading's next reset), and when `Read` is asked while the latest reading is older than the last turn end on it. `Read` otherwise answers from memory. `Configure.Polling.5` no longer reads.
+
+**The first reading.** The daemon used to read at start before the translator listened, and that reading was lost. The daemon's unit now follows the translator's, and the first reading is made on the opening of Flow's turn ends, which arrives through the translator: there is no read before the translator serves, and no retry.
+
+**Units.** The daemon's unit is ordered after the translator's and bound to it, wanted by it; the translator's is ordered after the Flow Nexus's unit at the place, part of it and wanted by it. A Flow restart restarts the translator and then the daemon, which subscribes again; stopping Flow stops Energy.
+
+**Memory: format version 2.** `energy.rkyv` is written at format version 2, which has no polling interval. A file of format version 1 (0.2.0) is upgraded on open with every reading, level, setting and reminder carried and its interval dropped; the archive written before the envelope (the proof of concept) is upgraded as in 0.2.0 and its interval dropped too. The translator's file stays at version 1.
+
 ## 0.2.0 — Protos 0.33.0 and a model-addressed Flow recipient
 
 All five packages move to 0.2.0. Branch-only preparation: the Flow dependency, signal-flow 57.0.0 (`065730f`, the contract Flow 0.53.3 is built with), is a branch revision and not yet a main.

@@ -1,6 +1,6 @@
 [package]
 name="energy-nexus-translator"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace=true
 rust-version.workspace=true
 
@@ -8,7 +8,7 @@ rust-version.workspace=true
 energy-nexus-emission={path="../emission"}
 energy-nexus-wire={path="../wire"}
 signal-energy-nexus={workspace=true,features=["datom"]}
-signal-flow={git="https://github.com/LiGoldragon/signal-flow",rev="065730ff8b628657a692e8890714cadde881f1d4",default-features=false}
+signal-flow.workspace=true
 meta-signal-energy-nexus={workspace=true,features=["datom"]}
 signal.workspace=true
 datom-codec={git="https://github.com/LiGoldragon/datom-codec",rev="eabead4"}
