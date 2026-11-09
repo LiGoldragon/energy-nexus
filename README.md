@@ -9,15 +9,17 @@ The processes stay separated:
 - `energy-nexus` and `energy-nexus-meta` are text-only clients.
 - `energy-pace` shows both providers' usage per period, target, standing, and daily share.
 
-All process-to-process traffic behind the translator is length-prefixed, validated rkyv signal. A place names an instance; its runtime and state paths are passed once when its processes start. The text clients resolve the place name below the standard XDG runtime and state roots:
+All process-to-process traffic behind the translator is length-prefixed, validated rkyv signal. A place names an instance; its runtime and state paths are passed once when its processes start. The text clients take the datom and nothing else: the place is their configuration's, one datom at `$XDG_CONFIG_HOME/nexus/energy-nexus.datom` (`~/.config/nexus/energy-nexus.datom` when the variable is unset or empty), `CliConfiguration.{ PlaceName }`, and the place name is resolved below the standard XDG runtime and state roots. No place is typed: a second argument is refused. A configuration that is missing, cannot be read or names no place is a typed refusal naming the file (`Missing.<path>`, `Unreadable.{ <path> <reason> }`, `Invalid.{ <path> <reason> }`, exit 2), and nothing is sent.
 
 ```sh
 energy-nexus-daemon main /run/user/1001/nexus/main ~/.local/state/nexus/main
 energy-translator main /run/user/1001/nexus/main ~/.local/state/nexus/main
-energy-nexus main 'Read.Codex'
-energy-nexus-meta main 'Configure.RedeemExpiring.720'
-energy-nexus-meta main 'Configure.Program.{ Flow /home/li/.local/bin/flow }'
-energy-pace main
+# ~/.config/nexus/energy-nexus.datom
+{ main }
+energy-nexus 'Read.Codex'
+energy-nexus-meta 'Configure.RedeemExpiring.720'
+energy-nexus-meta 'Configure.Program.{ Flow /home/li/.local/bin/flow }'
+energy-pace
 ```
 
 A place's two directories are shared with every other Nexus at the place and are declared by the environment (CriomOS-home declares them as user tmpfiles rules); no Energy process makes or removes them, and a process whose place is absent does not start. Each process makes only its own sockets there and removes only those when it is stopped (SIGTERM or SIGINT): the daemon `energy.sock` and `energy-meta.sock`, the translator `energy-translator.sock`, `energy-meta-translator.sock` and `energy-emission.sock`. Every Nexus at a place places a socket at its name only once it listens: it is bound under a temporary name beside it, `.<name>.<pid>`, its mode set to `0600`, made to listen, then renamed to its name. A stale socket a crashed process left at the name is replaced by the rename; one that accepts a connection is refused. A peer waiting for a Nexus waits on its socket's name moved in (inotify `IN_MOVED_TO`) and connects at once. Its memory is `energy.rkyv` (the daemon) and `energy-translator.rkyv` (the translator's configured programs) in State. Each file is an envelope (its kind, a format version, the archive's length) around an rkyv archive. A file written before the envelope, by the proof of concept, is upgraded on open; every reading and setting is carried, and each reminder, whose recipient named a Flow layer, is named on the daemon's standard error to be configured again with a model. Only a missing file makes a memory new; a file that cannot be read keeps the process from starting and is left as it is. Every change is saved before it is used, and a failed save is answered as a refusal.
@@ -32,6 +34,6 @@ Energy reads a provider on three events and never on an interval:
 
 When nothing happens, nothing is read.
 
-The configured Flow program is run with one argument, the `Send` datom, and reaches the Flow Nexus at the place it names: once Flow 0.53.3 is at main, Home's `~/.local/bin/flow` is `flow main`.
+The configured Flow program is run with one argument, the `Send` datom, and reaches the Flow Nexus at the place its own configuration names: once Flow 0.53.3 is at main, Home's `~/.local/bin/flow` is Flow 0.53.3's `flow`, which reads `~/.config/nexus/flow.datom`, `{ main }`.
 
 An explicit `Redeem.Codex` is treated as evidence that work is waiting. It never redeems a later available reset while an earlier one stands. Tests use recorded provider documents and a fake Flow peer; they do not read live providers or consume a real reset.

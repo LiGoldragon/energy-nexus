@@ -10,6 +10,8 @@ All five packages move to 0.3.1. No contract or memory change.
 
 **Units.** The translator's unit wants the Flow unit and is ordered after it (`Wants=`, `After=`); it is no longer part of it and no longer wanted by it, so stopping or restarting Flow leaves Energy running. The daemon stays ordered after the translator and bound to it.
 
+**The CLIs take the datom alone.** `energy-nexus '<datom>'`, `energy-nexus-meta '<datom>'` and `energy-pace [Claude|Codex]` type no place: it is read from `$XDG_CONFIG_HOME/nexus/energy-nexus.datom` (`~/.config/nexus/energy-nexus.datom` when unset or empty), `CliConfiguration.{ PlaceName }`, e.g. `{ main }` (vision:nexus-v1). A second argument is refused; a configuration missing, unreadable or naming no place is a typed refusal naming the file, exit 2. The daemon's note on an uncarried reminder names `energy-nexus-meta 'Configure.Reminder.{ … }'` without a place.
+
 **Window resets survive a suspend.** Each provider's reset alarm is a timerfd on `CLOCK_REALTIME`, set with `TFD_TIMER_ABSTIME` at the reading's next reset: it fires at that wall-clock instant, and at once on resume when the instant passed during a suspend. The monotonic timer it replaces ran late by the length of the suspend.
 
 ## 0.3.0 — reads on events; no polling interval

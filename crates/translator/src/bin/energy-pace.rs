@@ -1,6 +1,7 @@
 use datom_codec::{Actualizing, Potential};
+use energy_nexus_translator::cli::ConfiguredPlace;
 use energy_nexus_translator::{TextClienting, Translator};
-use energy_nexus_wire::{Place, PlaceName};
+use energy_nexus_wire::Place;
 use signal_energy_nexus::{Provider, Response, Target};
 
 fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
@@ -57,18 +58,24 @@ fn show(read: signal_energy_nexus::Read_Data) {
     }
 }
 
+/// `energy-pace [Claude|Codex]`: no place is typed; it is the
+/// configuration's, `$XDG_CONFIG_HOME/nexus/energy-nexus.datom`.
 fn main() {
-    let mut arguments = std::env::args().skip(1);
-    let name = arguments
-        .next()
-        .expect("usage: energy-pace PLACE [Claude|Codex]");
-    let providers = match arguments.next().as_deref() {
-        Some("Claude") => vec![Provider::Claude],
-        Some("Codex") => vec![Provider::Codex],
-        Some(_) => panic!("provider is Claude or Codex"),
-        None => vec![Provider::Claude, Provider::Codex],
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let providers = match arguments.as_slice() {
+        [] => vec![Provider::Claude, Provider::Codex],
+        [only] if only == "Claude" => vec![Provider::Claude],
+        [only] if only == "Codex" => vec![Provider::Codex],
+        _ => {
+            eprintln!("usage: energy-pace [Claude|Codex]; the place is read from $XDG_CONFIG_HOME/nexus/energy-nexus.datom");
+            std::process::exit(2)
+        }
     };
-    let client = Translator::client(Place::resolve(PlaceName(name)).expect("resolve place"));
+    let place = Place::configured().unwrap_or_else(|refusal| {
+        eprintln!("{refusal}");
+        std::process::exit(2)
+    });
+    let client = Translator::client(place);
     for provider in providers {
         show(read(&client, provider).expect("read energy pace"));
     }

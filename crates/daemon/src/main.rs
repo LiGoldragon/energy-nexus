@@ -291,8 +291,8 @@ impl Serving for Place {
             eprintln!(
                 "energy-nexus: reminder not carried, its recipient names a layer and Flow \
                  addresses a model: {reminder}; configure it again with the model that serves \
-                 it: energy-nexus-meta {} 'Configure.Reminder.{{ {:?} {:?} {{ {:?} {} <Model> }} }}'",
-                self.name.0, reminder.provider, reminder.level, address.aspect, address.topic
+                 it: energy-nexus-meta 'Configure.Reminder.{{ {:?} {:?} {{ {:?} {} <Model> }} }}'",
+                reminder.provider, reminder.level, address.aspect, address.topic
             );
         }
         let own = OwnedSockets(vec![self.public(), self.meta()]);

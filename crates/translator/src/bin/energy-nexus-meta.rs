@@ -1,11 +1,20 @@
+use energy_nexus_translator::cli::ConfiguredPlace;
 use energy_nexus_translator::{TextClienting, Translator};
-use energy_nexus_wire::{Place, PlaceName};
+use energy_nexus_wire::Place;
+/// `energy-nexus-meta '<datom>'`: the datom and nothing else; the place is
+/// the configuration's, `$XDG_CONFIG_HOME/nexus/energy-nexus.datom`.
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let name = args.next().expect("usage: energy-nexus-meta PLACE DATOM");
-    let text = args.next().expect("datom");
-    let client = Translator::client(Place::resolve(PlaceName(name)).expect("resolve place"));
-    for answer in client.request(&text, true, false).expect("request") {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let [text] = arguments.as_slice() else {
+        eprintln!("usage: energy-nexus-meta '<datom>'; the place is read from $XDG_CONFIG_HOME/nexus/energy-nexus.datom");
+        std::process::exit(2)
+    };
+    let place = Place::configured().unwrap_or_else(|refusal| {
+        eprintln!("{refusal}");
+        std::process::exit(2)
+    });
+    let client = Translator::client(place);
+    for answer in client.request(text, true, false).expect("request") {
         println!("{answer}");
     }
 }

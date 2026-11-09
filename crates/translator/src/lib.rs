@@ -18,6 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+pub mod cli;
 pub mod flow;
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
