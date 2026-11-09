@@ -126,6 +126,137 @@ impl Declared for Place {
         Ok(())
     }
 }
+/// A socket placed at its name in the place's runtime directory only once it
+/// listens, as every Nexus at a place places its sockets: bound under a
+/// temporary name beside its name, `.<name>.<pid>`, its mode set to `0600`,
+/// made to listen, then renamed to its name (rename(2) is atomic). A peer
+/// waiting for the socket waits on its name moved in (`IN_MOVED_TO`) and
+/// connects at once.
+pub struct PlacedSocket {
+    name: std::path::PathBuf,
+    temporary: std::path::PathBuf,
+}
+/// What stands at a socket's name before the socket is placed there.
+pub enum AtSocketName {
+    /// Nothing: the rename replaces nothing, so a socket another process
+    /// placed there since is never replaced.
+    Absent,
+    /// A socket nobody accepts on, left by a process that died: the rename
+    /// replaces it, with no moment at which the name is absent.
+    Stale,
+}
+pub trait PlacesSocket: Sized {
+    /// The socket to be placed at `name`.
+    fn at(name: &std::path::Path) -> std::io::Result<Self>;
+    /// The temporary name the socket is made under.
+    fn temporary(&self) -> &std::path::Path;
+    /// What stands at the name. A socket that accepts a connection belongs
+    /// to a live process and is refused, as is a file that is no socket.
+    fn found(&self) -> std::io::Result<AtSocketName>;
+    /// A socket bound at the temporary name, its mode `0600`, listening. A
+    /// leftover at this process's own temporary name is a dead process's
+    /// that had the same id, and is removed first.
+    fn listening(&self) -> std::io::Result<std::os::unix::net::UnixListener>;
+    /// Renames the temporary name to the name, over a stale socket or into
+    /// an absent name.
+    fn place(&self, found: AtSocketName) -> std::io::Result<()>;
+    /// The socket listening at its name; on any refusal nothing of it is
+    /// left at either name.
+    fn claim(&self) -> std::io::Result<std::os::unix::net::UnixListener> {
+        let found = self.found()?;
+        let listener = self.listening()?;
+        if let Err(error) = self.place(found) {
+            drop(listener);
+            let _ = std::fs::remove_file(self.temporary());
+            return Err(error);
+        }
+        Ok(listener)
+    }
+}
+impl PlacesSocket for PlacedSocket {
+    fn at(name: &std::path::Path) -> std::io::Result<Self> {
+        let unplaced = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("socket path {} names no file in a directory", name.display()),
+            )
+        };
+        let directory = name.parent().ok_or_else(unplaced)?;
+        let file_name = name.file_name().ok_or_else(unplaced)?;
+        let mut temporary = std::ffi::OsString::from(".");
+        temporary.push(file_name);
+        temporary.push(format!(".{}", std::process::id()));
+        Ok(Self {
+            name: name.to_owned(),
+            temporary: directory.join(temporary),
+        })
+    }
+    fn temporary(&self) -> &std::path::Path {
+        &self.temporary
+    }
+    fn found(&self) -> std::io::Result<AtSocketName> {
+        use std::io::{Error, ErrorKind};
+        use std::os::unix::fs::FileTypeExt;
+        let name = &self.name;
+        match std::fs::symlink_metadata(name) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                match std::os::unix::net::UnixStream::connect(name) {
+                    Ok(_peer) => Err(Error::new(
+                        ErrorKind::AddrInUse,
+                        format!("socket {} is already accepting connections", name.display()),
+                    )),
+                    Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+                        Ok(AtSocketName::Stale)
+                    }
+                    Err(error) if error.kind() == ErrorKind::NotFound => Ok(AtSocketName::Absent),
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(_) => Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("socket path {} exists and is not a socket", name.display()),
+            )),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(AtSocketName::Absent),
+            Err(error) => Err(error),
+        }
+    }
+    fn listening(&self) -> std::io::Result<std::os::unix::net::UnixListener> {
+        use nix::sys::socket::{
+            bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, UnixAddr,
+        };
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = &self.temporary;
+        match std::fs::remove_file(temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let descriptor = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )?;
+        bind(descriptor.as_raw_fd(), &UnixAddr::new(temporary)?)?;
+        let made = std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| listen(&descriptor, Backlog::MAXCONN).map_err(std::io::Error::from));
+        if let Err(error) = made {
+            let _ = std::fs::remove_file(temporary);
+            return Err(error);
+        }
+        Ok(std::os::unix::net::UnixListener::from(descriptor))
+    }
+    fn place(&self, found: AtSocketName) -> std::io::Result<()> {
+        use nix::fcntl::{renameat2, RenameFlags, AT_FDCWD};
+        let flags = match found {
+            AtSocketName::Absent => RenameFlags::RENAME_NOREPLACE,
+            AtSocketName::Stale => RenameFlags::empty(),
+        };
+        renameat2(AT_FDCWD, &self.temporary, AT_FDCWD, &self.name, flags)
+            .map_err(std::io::Error::from)
+    }
+}
 /// The sockets one process makes at its place, and nothing else there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnedSockets(pub Vec<std::path::PathBuf>);
@@ -226,6 +357,87 @@ mod tests {
         assert!(own.0.iter().all(|socket| !socket.exists()));
         assert!(others.iter().all(|other| other.exists()));
         assert!(place.runtime.is_dir());
+    }
+
+    /// A socket bound at `path` that never listened, then closed: a
+    /// connection to it is refused.
+    fn stale(path: &std::path::Path) {
+        use nix::sys::socket::{bind, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+        use std::os::fd::AsRawFd;
+        let descriptor =
+            socket(AddressFamily::Unix, SockType::Stream, SockFlag::SOCK_CLOEXEC, None).unwrap();
+        bind(descriptor.as_raw_fd(), &UnixAddr::new(path).unwrap()).unwrap();
+    }
+
+    fn names(directory: &std::path::Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_socket_appears_at_its_name_listening_and_owner_only() {
+        use super::{PlacedSocket, PlacesSocket};
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let runtime = tempfile::tempdir().unwrap();
+        let name = runtime.path().join("energy.sock");
+        let placed = PlacedSocket::at(&name).unwrap();
+        assert_eq!(
+            placed.temporary(),
+            runtime.path().join(format!(".energy.sock.{}", std::process::id()))
+        );
+        let _listener = placed.claim().unwrap();
+        let metadata = std::fs::symlink_metadata(&name).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        std::os::unix::net::UnixStream::connect(&name).expect("the name listens");
+        assert_eq!(names(runtime.path()), ["energy.sock"]);
+    }
+
+    #[test]
+    fn a_stale_socket_is_replaced_by_the_rename_and_a_live_one_refused() {
+        use super::{PlacedSocket, PlacesSocket};
+        use std::os::unix::fs::MetadataExt;
+        let runtime = tempfile::tempdir().unwrap();
+        let name = runtime.path().join("energy.sock");
+        stale(&name);
+        let before = std::fs::symlink_metadata(&name).unwrap().ino();
+        let listener = PlacedSocket::at(&name).unwrap().claim().unwrap();
+        assert_ne!(std::fs::symlink_metadata(&name).unwrap().ino(), before);
+        std::os::unix::net::UnixStream::connect(&name).expect("the replacement listens");
+        assert!(
+            PlacedSocket::at(&name).unwrap().claim().is_err(),
+            "a live socket is refused"
+        );
+        std::os::unix::net::UnixStream::connect(&name).expect("the live socket still listens");
+        drop(listener);
+        std::fs::write(runtime.path().join("other"), "not a socket").unwrap();
+        assert!(PlacedSocket::at(&runtime.path().join("other"))
+            .unwrap()
+            .claim()
+            .is_err());
+        assert_eq!(names(runtime.path()), ["energy.sock", "other"]);
+    }
+
+    /// A crash between bind and rename leaves a temporary name. One of this
+    /// process's own id is a dead process's and is replaced; another's is
+    /// left as it is, and neither is the socket.
+    #[test]
+    fn a_leftover_temporary_name_is_never_the_socket() {
+        use super::{PlacedSocket, PlacesSocket};
+        let runtime = tempfile::tempdir().unwrap();
+        let name = runtime.path().join("energy.sock");
+        let placed = PlacedSocket::at(&name).unwrap();
+        stale(placed.temporary());
+        let foreign = runtime.path().join(".energy.sock.1");
+        stale(&foreign);
+        let _listener = placed.claim().unwrap();
+        std::os::unix::net::UnixStream::connect(&name).expect("the name listens");
+        assert!(std::os::unix::net::UnixStream::connect(&foreign).is_err());
+        assert_eq!(names(runtime.path()), [".energy.sock.1", "energy.sock"]);
     }
 
     #[test]

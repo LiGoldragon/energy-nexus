@@ -12,11 +12,12 @@ use energy_nexus_emission::{
 use schedule::{Event, Reads, Schedule, WallClock};
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
-    OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
+    OwningSockets, Persisted, Place, PlacedSocket, PlacesSocket, Readiness, SocketPathing,
+    Upgrade,
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{Call, Changed_Data, Provider, Query, Read_Data, Refused, Response};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 struct Nexus {
@@ -296,9 +297,10 @@ impl Serving for Place {
         }
         let own = OwnedSockets(vec![self.public(), self.meta()]);
         own.remove_at_stop()?;
-        own.remove();
-        let public = UnixListener::bind(self.public())?;
-        let meta = UnixListener::bind(self.meta())?;
+        // Each socket appears at its name only once it listens, replacing a
+        // stale one a crashed daemon left there.
+        let public = PlacedSocket::at(&self.public())?.claim()?;
+        let meta = PlacedSocket::at(&self.meta())?.claim()?;
         let latest = [Provider::Claude, Provider::Codex]
             .iter()
             .filter_map(|provider| memory.latest(provider))

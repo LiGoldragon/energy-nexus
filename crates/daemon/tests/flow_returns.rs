@@ -3,11 +3,11 @@
 //! daemon answers from memory and reads nothing while Flow is absent; when
 //! Flow's socket appears again the translator subscribes once, and the new
 //! opening reads the provider whose reading is older than its last turn
-//! end, as the first opening did. A fake Flow plays both Flows, binding and
-//! protecting its socket as Flow 0.53.3 does, and a fake Codex answers the
+//! end, as the first opening did. A fake Flow plays both Flows, placing its
+//! socket as every Nexus at a place does, and a fake Codex answers the
 //! readings; every wait is on an event and bounded by EVENT_WAIT.
 use energy_nexus_translator::{Programs, Translating, Translator};
-use energy_nexus_wire::{Framing, Place, PlaceName, SocketPathing};
+use energy_nexus_wire::{Framing, Place, PlaceName, PlacedSocket, PlacesSocket, SocketPathing};
 use nix::sys::signal::{kill, Signal as Kill};
 use nix::unistd::Pid;
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
@@ -95,12 +95,10 @@ fn ask(place: &Place, input: Query) -> Response {
     response(&mut question)
 }
 
-/// Flow's socket at the place as Flow 0.53.3 makes it: bound and listening,
-/// then its mode set.
+/// Flow's socket at the place as every Nexus at it places its own: made
+/// under a temporary name, its mode set, listening, then moved to its name.
 fn flow_binds(socket: &std::path::Path) -> UnixListener {
-    let listener = UnixListener::bind(socket).unwrap();
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-    listener
+    PlacedSocket::at(socket).unwrap().claim().unwrap()
 }
 
 /// One subscription Flow takes, with its query.

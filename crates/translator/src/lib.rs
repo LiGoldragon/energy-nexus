@@ -5,7 +5,8 @@ use energy_nexus_emission::{
 };
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Earlier, Envelope, Framing, MemoryPathing, MemoryRefusal,
-    OwnedSockets, OwningSockets, Persisted, Place, Readiness, SocketPathing, Upgrade,
+    OwnedSockets, OwningSockets, Persisted, Place, PlacedSocket, PlacesSocket, Readiness,
+    SocketPathing, Upgrade,
 };
 use serde_json::{json, Value};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
@@ -63,8 +64,8 @@ pub trait Translating {
     fn emit(&self, emission: Emission) -> Outcome;
     /// Takes its sockets at its place, announces readiness and serves.
     fn serve(&self) -> std::io::Result<()>;
-    /// Binds the three sockets, removing a stale one of its own first; they
-    /// listen once this returns.
+    /// Places the three sockets, each at its name only once it listens and
+    /// replacing a stale one of its own; they listen once this returns.
     fn bind(&self) -> std::io::Result<Listening>;
 }
 /// The translator's three sockets, listening.
@@ -97,12 +98,12 @@ impl Translating for Translator {
         Ok(())
     }
     fn bind(&self) -> std::io::Result<Listening> {
-        OwnedSockets(self.own()).remove();
+        let placed = |name: std::path::PathBuf| PlacedSocket::at(&name)?.claim();
         Ok(Listening {
             translator: self.clone(),
-            public: UnixListener::bind(self.place.public_translator())?,
-            meta: UnixListener::bind(self.place.meta_translator())?,
-            emission: UnixListener::bind(self.place.emission())?,
+            public: placed(self.place.public_translator())?,
+            meta: placed(self.place.meta_translator())?,
+            emission: placed(self.place.emission())?,
         })
     }
 }

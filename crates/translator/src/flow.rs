@@ -39,9 +39,10 @@ impl SubscribesToFlow for ObserveTurnEnds {
 }
 
 /// The watch on Flow's socket in the place's runtime directory. It names
-/// the socket made there (`IN_CREATE`), moved there (`IN_MOVED_TO`) or
-/// changed there (`IN_ATTRIB`): Flow sets its socket's mode once it listens,
-/// so a socket found made but not yet listening is followed by that event.
+/// the socket moved to its name (`IN_MOVED_TO`) and nothing else: every
+/// Nexus at a place makes its socket under a temporary name and renames it
+/// to its name once it listens, so that event is Flow's socket listening.
+/// Flow places it so from 0.53.3, the first Flow at a place.
 pub struct FlowWatch {
     inotify: Inotify,
     socket: PathBuf,
@@ -50,7 +51,7 @@ pub struct FlowWatch {
 /// What one batch of the watch's events says.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Watched {
-    /// Flow's socket was made, moved in or changed.
+    /// Flow's socket was moved to its name.
     Appeared,
     /// Only other files changed.
     Other,
@@ -71,9 +72,7 @@ impl FlowWatch {
         let inotify = Inotify::init(InitFlags::IN_CLOEXEC | InitFlags::IN_NONBLOCK)?;
         inotify.add_watch(
             &directory,
-            AddWatchFlags::IN_CREATE
-                | AddWatchFlags::IN_MOVED_TO
-                | AddWatchFlags::IN_ATTRIB
+            AddWatchFlags::IN_MOVED_TO
                 | AddWatchFlags::IN_DELETE_SELF
                 | AddWatchFlags::IN_MOVE_SELF
                 | AddWatchFlags::IN_ONLYDIR,
@@ -233,9 +232,9 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
             }
         }
     }
-    /// Waits for Flow's socket to appear and subscribes on that event. A
-    /// subscription refused after the event (the socket made but not yet
-    /// listening) waits for the next one.
+    /// Waits for Flow's socket to be moved to its name and subscribes on
+    /// that event. A subscription refused after the event (something moved
+    /// to the name that does not listen) waits for the next one.
     fn wait(&mut self) -> Waited {
         let Ok(epoll) = self.epoll(&self.watch.inotify) else {
             return Waited::WatchLost;
@@ -298,6 +297,7 @@ mod tests {
     use super::*;
     use crate::FlowFraming;
     use energy_nexus_emission::Response as EmissionResponse;
+    use energy_nexus_wire::{PlacedSocket, PlacesSocket};
     use signal::{Restorable, Signal};
     use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt;
@@ -320,8 +320,7 @@ mod tests {
         }
     }
 
-    /// A Flow socket bound and not yet listening, as Flow's is for the
-    /// moment between bind and listen.
+    /// A socket bound at `socket` and not listening.
     fn bound(socket: &Path) -> std::os::fd::OwnedFd {
         use nix::sys::socket::{bind, socket as open, AddressFamily, SockFlag, SockType, UnixAddr};
         use std::os::fd::AsRawFd;
@@ -330,18 +329,25 @@ mod tests {
         fd
     }
 
-    /// As Flow 0.53.3 does once its socket listens.
-    fn protect(socket: &Path) {
-        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    /// Flow's socket placed as every Nexus at a place places its own: made
+    /// under a temporary name, its mode set, listening, then renamed to its
+    /// name.
+    fn placed(socket: &Path) -> UnixListener {
+        PlacedSocket::at(socket).unwrap().claim().unwrap()
     }
 
     /// The other files of a shared place changing: no event of Flow's.
+    /// Another Nexus places its socket and removes it; a temporary name of
+    /// Flow's own is made, its mode set, and removed, as a crash between
+    /// bind and rename leaves one; another file is written beside them.
     fn others_change(runtime: &Path) {
         let other = runtime.join("energy.sock");
-        let listener = UnixListener::bind(&other).unwrap();
-        protect(&other);
-        drop(listener);
+        drop(placed(&other));
         std::fs::remove_file(&other).unwrap();
+        let leftover = runtime.join(".flow.sock.1");
+        drop(bound(&leftover));
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_file(&leftover).unwrap();
         std::fs::write(runtime.join("flow.sock.part"), "not Flow's").unwrap();
         std::fs::remove_file(runtime.join("flow.sock.part")).unwrap();
     }
@@ -408,16 +414,18 @@ mod tests {
         // attempt, which follows them in the watch's order: it finds the
         // socket bound, so it was made on that event, not on these.)
         others_change(&runtime);
-        // Flow's socket made, not yet listening: one attempt, refused, and
-        // the relay waits for the next event, not on a timer.
-        let flow = bound(&socket);
+        // A socket that does not listen moved to Flow's name: one attempt,
+        // refused, and the relay waits for the next event, not on a timer.
+        let moved = runtime.join("unlistened");
+        let unlistened = bound(&moved);
+        std::fs::rename(&moved, &socket).unwrap();
         assert_eq!(attempt(), Err(ErrorKind::ConnectionRefused));
-        // Flow listens (no event), then sets its socket's mode: that event
-        // subscribes.
-        nix::sys::socket::listen(&flow, nix::sys::socket::Backlog::new(16).unwrap()).unwrap();
-        protect(&socket);
+        // Flow places its socket over the stale one: made under its
+        // temporary name, its mode set, listening (no event of the name's),
+        // then moved to its name: that event subscribes, at once.
+        let first = placed(&socket);
+        drop(unlistened);
         assert_eq!(attempt(), Ok(()));
-        let first = UnixListener::from(flow);
         let (mut peer, query) = accepted(&first);
         assert_eq!(
             query,
@@ -433,10 +441,9 @@ mod tests {
         std::fs::remove_file(&socket).unwrap();
         others_change(&runtime);
 
-        // Flow comes back as Flow binds: bound and listening, then its mode
-        // set. One subscription; its opening reaches the daemon.
-        let second = UnixListener::bind(&socket).unwrap();
-        protect(&socket);
+        // Flow comes back and places its socket. One subscription; its
+        // opening reaches the daemon.
+        let second = placed(&socket);
         assert_eq!(attempt(), Ok(()));
         let (mut peer, query) = accepted(&second);
         assert_eq!(
@@ -467,7 +474,7 @@ mod tests {
         assert_eq!(std::io::Read::read_to_end(&mut peer, &mut rest).unwrap(), 0);
         relay.join().unwrap();
         // Four attempts in all: the first look, the refused one, and one on
-        // each appearance; no other.
+        // each placing of Flow's socket; no other.
         assert!(attempts.try_recv().is_err(), "no further attempt");
         second.set_nonblocking(true).unwrap();
         assert_eq!(
@@ -483,7 +490,7 @@ mod tests {
         let runtime = directory.path().join("runtime");
         std::fs::create_dir(&runtime).unwrap();
         let socket = runtime.join("flow.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let listener = placed(&socket);
         let (mut daemon, relay_end) = UnixStream::pair().unwrap();
         daemon.set_read_timeout(Some(EVENT_WAIT)).unwrap();
         let (attempted, attempts) = mpsc::channel();
