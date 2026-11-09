@@ -4,7 +4,8 @@ use energy_nexus_emission::{
     Query as EmissionQuery, Response as EmissionResponse, Send,
 };
 use energy_nexus_wire::{
-    Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place, SocketPathing,
+    AnnouncesReadiness, Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place,
+    Readiness, SocketPathing,
 };
 use serde_json::{json, Value};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
@@ -52,6 +53,11 @@ impl Translating for Translator {
         let public = UnixListener::bind(self.place.public_translator())?;
         let meta = UnixListener::bind(self.place.meta_translator())?;
         let emission = UnixListener::bind(self.place.emission())?;
+        // All three sockets listen: the clients and the daemon find the
+        // translator serving.
+        if let Err(error) = Readiness::announce_ready() {
+            eprintln!("readiness not announced: {error}");
+        }
         let this = self.clone();
         std::thread::spawn(move || {
             for stream in emission.incoming().flatten() {

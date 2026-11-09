@@ -21,4 +21,4 @@ nix={version="0.30",features=["socket","signal"]}
 rkyv.workspace=true
 
 [dev-dependencies]
-nix={version="0.30",features=["socket","signal","inotify"]}
+nix={version="0.30",features=["socket","signal"]}

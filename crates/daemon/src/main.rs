@@ -7,7 +7,8 @@ use energy_nexus_emission::{
     Outcome as ExternalOutcome, Query as EmissionQuery, Response as EmissionResponse, Send,
 };
 use energy_nexus_wire::{
-    Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place, SocketPathing,
+    AnnouncesReadiness, Declared, Framing, MemoryPathing, OwnedSockets, OwningSockets, Place,
+    Readiness, SocketPathing,
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{Call, Changed_Data, Provider, Query, Read_Data, Refused, Response};
@@ -188,6 +189,11 @@ impl Serving for Place {
             subscribers: Vec::new(),
             place: self.clone(),
         }));
+        // Both sockets listen and Memory is loaded: a unit ordered after
+        // this one (the translator) finds the daemon serving.
+        if let Err(error) = Readiness::announce_ready() {
+            eprintln!("readiness not announced: {error}");
+        }
         {
             let nexus = Arc::clone(&nexus);
             std::thread::spawn(move || loop {

@@ -160,6 +160,30 @@ impl OwningSockets for OwnedSockets {
         Ok(())
     }
 }
+/// systemd's readiness protocol: a unit of Type=notify has started once its
+/// main process sends `READY=1` to the datagram socket `NOTIFY_SOCKET`
+/// names, a path or, after `@`, an abstract name.
+pub struct Readiness;
+pub trait AnnouncesReadiness {
+    /// Sends `READY=1` to `$NOTIFY_SOCKET` when it is set; does nothing when
+    /// it is not. Called once every socket the process serves is bound.
+    fn announce_ready() -> std::io::Result<()>;
+}
+impl AnnouncesReadiness for Readiness {
+    fn announce_ready() -> std::io::Result<()> {
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::{SocketAddr, UnixDatagram};
+        let Some(target) = std::env::var_os("NOTIFY_SOCKET") else {
+            return Ok(());
+        };
+        let address = match target.as_encoded_bytes().strip_prefix(b"@") {
+            Some(name) => SocketAddr::from_abstract_name(name),
+            None => SocketAddr::from_pathname(std::path::Path::new(&target)),
+        }?;
+        UnixDatagram::unbound()?.send_to_addr(b"READY=1", &address)?;
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{MemoryPathing, OwnedSockets, OwningSockets, Place, PlaceName, SocketPathing};

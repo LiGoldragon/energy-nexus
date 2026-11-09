@@ -13,5 +13,5 @@ meta-signal-energy-nexus.workspace=true
 signal.workspace=true
 
 [dev-dependencies]
-nix={version="0.30",features=["signal","inotify"]}
+nix={version="0.30",features=["signal"]}
 tempfile="3"

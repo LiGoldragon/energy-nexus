@@ -1,24 +1,55 @@
 //! The daemon at a place shared with other Nexuses: it finds the place's
-//! directories, makes only its own sockets in them, and removes only those
-//! sockets when it is stopped.
+//! directories, makes only its own sockets in them, announces readiness
+//! once they listen, and removes only those sockets when it is stopped.
+//! Every wait here is on an event, READY=1 or the child's exit, and each is
+//! bounded by EVENT_WAIT: a daemon that never announces or never exits fails
+//! the test there.
 use energy_nexus_wire::{Place, PlaceName, SocketPathing};
-use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use std::process::{Command, ExitStatus, Stdio};
+use std::os::unix::net::{UnixDatagram, UnixStream};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_energy-nexus-daemon");
-/// Written into Runtime by the test when the daemon exits, so a daemon that
-/// ends before its sockets exist ends the wait for them.
-const EXITED: &str = "daemon-exited";
+/// How long a test waits for any one event before it fails.
+const EVENT_WAIT: Duration = Duration::from_secs(60);
 
 struct SharedPlace {
     _directory: tempfile::TempDir,
     place: Place,
 }
+/// A started daemon: its pid and its exit, handed over by the thread that
+/// waits on it.
 struct Running {
     pid: Pid,
-    waiter: std::thread::JoinHandle<ExitStatus>,
+    exit: mpsc::Receiver<ExitStatus>,
+}
+impl Running {
+    fn started(mut child: Child) -> Self {
+        let pid = Pid::from_raw(child.id() as i32);
+        let (exited, exit) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = exited.send(child.wait().unwrap());
+        });
+        Self { pid, exit }
+    }
+    /// The exit, or the daemon killed and the test failed after EVENT_WAIT.
+    fn exit(self) -> ExitStatus {
+        match self.exit.recv_timeout(EVENT_WAIT) {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = kill(self.pid, Signal::SIGKILL);
+                panic!("the daemon did not exit within {EVENT_WAIT:?}: {error}")
+            }
+        }
+    }
+    /// Stops the daemon as systemd does, and waits for its exit.
+    fn stop(self) -> ExitStatus {
+        kill(self.pid, Signal::SIGTERM).unwrap();
+        self.exit()
+    }
 }
 impl SharedPlace {
     fn declared() -> Self {
@@ -50,55 +81,48 @@ impl SharedPlace {
         }
         others
     }
-    fn command(&self) -> Command {
+    fn command(place: &Place) -> Command {
         let mut command = Command::new(DAEMON);
         command
-            .arg(&self.place.name.0)
-            .arg(&self.place.runtime)
-            .arg(&self.place.state)
+            .arg(&place.name.0)
+            .arg(&place.runtime)
+            .arg(&place.state)
             .stdin(Stdio::null());
         command
     }
-    /// Starts the daemon and returns once both its sockets are made: the
-    /// wait reads creation events in Runtime.
+    /// Starts the daemon with the notify socket systemd would give it, and
+    /// returns once it announced READY=1.
     fn start(&self) -> Running {
-        let events = Inotify::init(InitFlags::empty()).unwrap();
-        events
-            .add_watch(&self.place.runtime, AddWatchFlags::IN_CREATE)
+        let notify_directory = tempfile::tempdir().unwrap();
+        let notify_path = notify_directory.path().join("notify.sock");
+        let notify = UnixDatagram::bind(&notify_path).unwrap();
+        notify.set_read_timeout(Some(EVENT_WAIT)).unwrap();
+        let child = Self::command(&self.place)
+            .env("NOTIFY_SOCKET", &notify_path)
+            .spawn()
             .unwrap();
-        let mut child = self.command().spawn().unwrap();
-        let pid = Pid::from_raw(child.id() as i32);
-        let exited = self.place.runtime.join(EXITED);
-        let waiter = std::thread::spawn(move || {
-            let status = child.wait().unwrap();
-            std::fs::write(exited, "").unwrap();
-            status
-        });
-        let mut made: Vec<std::ffi::OsString> = Vec::new();
-        let own: Vec<std::ffi::OsString> = self
-            .own()
-            .iter()
-            .map(|socket| socket.file_name().unwrap().to_owned())
-            .collect();
-        while !own.iter().all(|name| made.contains(name)) {
-            for event in events.read_events().unwrap() {
-                let name = event.name.unwrap();
-                assert!(
-                    name != EXITED,
-                    "the daemon ended before its sockets were made: {:?}",
-                    waiter.join()
-                );
-                made.push(name);
+        let running = Running::started(child);
+        let mut message = [0_u8; 64];
+        match notify.recv(&mut message) {
+            Ok(length) => assert_eq!(&message[..length], b"READY=1"),
+            Err(error) => {
+                let _ = kill(running.pid, Signal::SIGKILL);
+                panic!("the daemon announced no readiness: {error}");
             }
         }
-        Running { pid, waiter }
+        running
     }
 }
-impl Running {
-    fn stop(self) -> ExitStatus {
-        kill(self.pid, Signal::SIGTERM).unwrap();
-        self.waiter.join().unwrap()
+
+#[test]
+fn a_daemon_announces_readiness_once_its_sockets_listen() {
+    let shared = SharedPlace::declared();
+    let running = shared.start();
+    for socket in shared.own() {
+        UnixStream::connect(&socket)
+            .unwrap_or_else(|error| panic!("{} listens at readiness: {error}", socket.display()));
     }
+    assert!(running.stop().success());
 }
 
 #[test]
@@ -124,14 +148,10 @@ fn a_daemon_whose_place_is_absent_does_not_start_or_make_it() {
         state: directory.path().join("state"),
     };
     std::fs::create_dir(&place.state).unwrap();
-    let status = Command::new(DAEMON)
-        .arg(&place.name.0)
-        .arg(&place.runtime)
-        .arg(&place.state)
-        .stdin(Stdio::null())
+    let child = SharedPlace::command(&place)
         .stderr(Stdio::null())
-        .status()
+        .spawn()
         .unwrap();
-    assert!(!status.success());
+    assert!(!Running::started(child).exit().success());
     assert!(!place.runtime.exists());
 }
