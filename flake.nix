@@ -1,7 +1,7 @@
 {
   description = "Energy Nexus version 1";
   inputs = {
-    tests = { url = "github:LiGoldragon/energy-nexus-tests/0244073731c197b1d602dbdab7289a27b34abe6a"; flake = false; };
+    tests = { url = "github:LiGoldragon/energy-nexus-tests/f8a9d0ce7706ba465ea17bb44e928d26654fc413"; flake = false; };
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-build = { url = "github:LiGoldragon/rust-build"; inputs.nixpkgs.follows = "nixpkgs"; };
@@ -17,6 +17,7 @@
         cp ${tests}/scenarios/calculations/pure.rs "$out/crates/calculations/tests/pure.rs"
         mkdir -p "$out/crates/wire/tests"
         cp ${tests}/scenarios/admission/socket.rs "$out/crates/wire/tests/admission.rs"
+        cp ${tests}/scenarios/persistence/local.rs "$out/crates/wire/tests/persistence.rs"
         cp ${tests}/scenarios/admission/legacy-emission.ethos "$out/crates/wire/tests/legacy-emission.ethos"
         cp -R ${tests}/fixtures/legacy-contracts "$out/crates/wire/tests/legacy-contracts"
       '';
@@ -27,6 +28,11 @@
       admissionArtifacts = rust.craneLib.buildDepsOnly {
         src = source;
         cargoExtraArgs = "-p energy-nexus-wire";
+      };
+      wireCheck = rust.craneLib.cargoTest {
+        src = source;
+        cargoArtifacts = admissionArtifacts;
+        cargoTestExtraArgs = "-p energy-nexus-wire";
       };
       cargoArtifacts = rust.craneLib.buildDepsOnly { src = source; };
       package = rust.craneLib.buildPackage { src = source; inherit cargoArtifacts; cargoExtraArgs = "--workspace"; };
@@ -42,11 +48,8 @@
         cargoArtifacts = calculationArtifacts;
         cargoTestExtraArgs = "-p energy-nexus-calculations --no-default-features";
       };
-      checks.admission = rust.craneLib.cargoTest {
-        src = source;
-        cargoArtifacts = admissionArtifacts;
-        cargoTestExtraArgs = "-p energy-nexus-wire";
-      };
+      checks.admission = wireCheck;
+      checks.persistence = wireCheck;
       checks.test = rust.craneLib.cargoTest { src = source; inherit cargoArtifacts; cargoTestExtraArgs = "--workspace -- --nocapture"; };
       checks.nexus-dependency-boundary = rust.craneLib.mkCargoDerivation {
         pname = "energy-nexus-dependency-boundary"; version = "0.1.0"; src = source; inherit cargoArtifacts;

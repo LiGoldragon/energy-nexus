@@ -160,6 +160,10 @@ pub trait Persisted: Sized {
             path: path.to_owned(),
             source,
         })?;
+        Self::admit_bytes(path, &bytes)
+    }
+    /// Validates exactly these already-read bytes, preserving their identity.
+    fn admit_bytes(path: &Path, bytes: &[u8]) -> Result<Admission<Self>, MemoryRefusal> {
         let truncated = |found: usize| MemoryRefusal::Truncated {
             path: path.to_owned(),
             found: found as u64,
