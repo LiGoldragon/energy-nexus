@@ -256,6 +256,7 @@ dependencies = [
  "meta-signal-energy-nexus",
  "nix",
  "rkyv",
+ "serde_json",
  "sha2",
  "signal",
  "signal-energy-nexus",
