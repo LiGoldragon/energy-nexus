@@ -1,7 +1,7 @@
 {
   description = "Energy Nexus version 1";
   inputs = {
-    tests = { url = "github:LiGoldragon/energy-nexus-tests/f8a9d0ce7706ba465ea17bb44e928d26654fc413"; flake = false; };
+    tests = { url = "github:LiGoldragon/energy-nexus-tests/98084f77e3f0b18ff7dcb76ae72dc8ff21d40b8b"; flake = false; };
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-build = { url = "github:LiGoldragon/rust-build"; inputs.nixpkgs.follows = "nixpkgs"; };

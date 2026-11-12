@@ -6,6 +6,8 @@ rust-version.workspace=true
 
 [dependencies]
 signal-energy-nexus.workspace=true
+meta-signal-energy-nexus.workspace=true
+energy-nexus-emission={path="../emission"}
 sha2="=0.10.9"
 signal.workspace=true
 rkyv.workspace=true
@@ -13,5 +15,3 @@ nix={version="0.30",features=["signal","socket","fs"]}
 
 [dev-dependencies]
 tempfile="3"
-meta-signal-energy-nexus.workspace=true
-energy-nexus-emission={path="../emission"}
