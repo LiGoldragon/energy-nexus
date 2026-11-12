@@ -10,29 +10,112 @@
 //! first one did at start. Nothing is tried on a timer: the watch is armed
 //! before Flow is first looked for, so a socket made at any later moment is
 //! an event, and every connection attempt after the first follows one.
+//!
+//! Every subscription greets first, as signal-flow 61 requires of an
+//! ordinary connection: the translator writes signal-flow's `Handshake`,
+//! reads the receipt, and writes its query only on `Greeted` naming the
+//! digest of the contract it was built with. Any other answer is a typed
+//! `SubscriptionFailure` and the connection is closed with no query sent.
 use crate::{turn_end_outcome, FlowFraming};
 use energy_nexus_emission::{Outcome, Response as EmissionResponse};
 use energy_nexus_wire::Framing;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use signal::{ByteViewable, Signalizable};
+use signal_flow::Contracted;
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-/// Opens the subscription on Flow's socket: one connection and the
-/// `Observe.TurnEnds` query on it.
-pub trait SubscribesToFlow: Send + 'static {
-    fn subscribe(&self, socket: &Path) -> std::io::Result<UnixStream>;
+/// How long Flow has to answer the greeting. A Flow that accepted the
+/// connection and says nothing is a failed subscription, which waits for
+/// the socket's next event like any other.
+const GREETING_WAIT: Duration = Duration::from_secs(30);
+
+/// Why one subscription was not opened. Each is a failed attempt; the
+/// relay waits for the next event of Flow's socket.
+#[derive(Debug)]
+pub enum SubscriptionFailure {
+    /// The socket could not be reached, or a frame could not be written or
+    /// read on it.
+    Transport(std::io::Error),
+    /// Flow answered the greeting with `GreetingRefused`: its contract is
+    /// not signal-flow 61's. The rejection carries Flow's own digest.
+    GreetingRefused(signal_flow::HandshakeRejection),
+    /// Flow answered `Greeted` naming a contract other than this
+    /// translator's.
+    GreetedAnotherContract(signal_flow::ContractDigest),
+    /// Flow's answer to the greeting is no `HandshakeReceipt`.
+    ReceiptUnreadable(String),
 }
-/// The subscription as Flow 0.53.3 takes it: `Observe.TurnEnds`, signal.
+impl From<std::io::Error> for SubscriptionFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Transport(error)
+    }
+}
+impl std::fmt::Display for SubscriptionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "{error}"),
+            Self::GreetingRefused(rejection) => {
+                write!(formatter, "ordinary greeting refused: {rejection:?}")
+            }
+            Self::GreetedAnotherContract(digest) => {
+                write!(formatter, "Flow greeted with another contract: {digest:?}")
+            }
+            Self::ReceiptUnreadable(reason) => {
+                write!(formatter, "Flow's greeting receipt is unreadable: {reason}")
+            }
+        }
+    }
+}
+
+/// Writes signal-flow's greeting and reads the receipt: Ok on `Greeted`
+/// naming the digest of the contract this translator was built with.
+pub trait GreetsFlowNexus {
+    fn greet_flow(&mut self) -> Result<(), SubscriptionFailure>;
+}
+impl GreetsFlowNexus for UnixStream {
+    fn greet_flow(&mut self) -> Result<(), SubscriptionFailure> {
+        let greeting = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        self.write_flow_frame(&greeting)?;
+        self.set_read_timeout(Some(GREETING_WAIT))?;
+        let frame = self.read_flow_frame()?;
+        self.set_read_timeout(None)?;
+        match rkyv::from_bytes::<signal_flow::HandshakeReceipt, rkyv::rancor::Error>(&frame) {
+            Ok(signal_flow::HandshakeReceipt::Greeted(digest))
+                if digest == signal_flow::Query::contract_digest() =>
+            {
+                Ok(())
+            }
+            Ok(signal_flow::HandshakeReceipt::Greeted(digest)) => {
+                Err(SubscriptionFailure::GreetedAnotherContract(digest))
+            }
+            Ok(signal_flow::HandshakeReceipt::GreetingRefused(rejection)) => {
+                Err(SubscriptionFailure::GreetingRefused(rejection))
+            }
+            Err(error) => Err(SubscriptionFailure::ReceiptUnreadable(error.to_string())),
+        }
+    }
+}
+
+/// Opens the subscription on Flow's socket: one connection, the greeting on
+/// it, and the `Observe.TurnEnds` query once Flow has greeted.
+pub trait SubscribesToFlow: Send + 'static {
+    fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure>;
+}
+/// The subscription as Flow 0.54.7 takes it (signal-flow 61): the greeting,
+/// then `Observe.TurnEnds`.
 pub struct ObserveTurnEnds;
 impl SubscribesToFlow for ObserveTurnEnds {
-    fn subscribe(&self, socket: &Path) -> std::io::Result<UnixStream> {
+    fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure> {
         let query = signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds);
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let mut flow = UnixStream::connect(socket)?;
+        flow.greet_flow()?;
         flow.write_flow_frame(&bytes)?;
         Ok(flow)
     }
@@ -307,15 +390,27 @@ mod tests {
 
     const EVENT_WAIT: Duration = Duration::from_secs(60);
 
+    /// How one attempt failed, as the tests compare it.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Failed {
+        Transport(ErrorKind),
+        GreetingRefused(signal_flow::HandshakeRejection),
+        Other,
+    }
+
     /// The real subscription, each attempt and its result reported to the
     /// test as it is made.
-    struct Counted(mpsc::Sender<Result<(), ErrorKind>>);
+    struct Counted(mpsc::Sender<Result<(), Failed>>);
     impl SubscribesToFlow for Counted {
-        fn subscribe(&self, socket: &Path) -> std::io::Result<UnixStream> {
+        fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure> {
             let result = ObserveTurnEnds.subscribe(socket);
-            let _ = self
-                .0
-                .send(result.as_ref().map(|_| ()).map_err(|error| error.kind()));
+            let _ = self.0.send(result.as_ref().map(|_| ()).map_err(|failure| match failure {
+                SubscriptionFailure::Transport(error) => Failed::Transport(error.kind()),
+                SubscriptionFailure::GreetingRefused(rejection) => {
+                    Failed::GreetingRefused(rejection.clone())
+                }
+                _ => Failed::Other,
+            }));
             result
         }
     }
@@ -352,31 +447,83 @@ mod tests {
         std::fs::remove_file(runtime.join("flow.sock.part")).unwrap();
     }
 
-    /// Flow takes one subscription: the accepted connection and its query.
-    fn accepted(listener: &UnixListener) -> (UnixStream, signal_flow::Query) {
+    /// Flow, as signal-flow 61 plays it, reads the peer's greeting and
+    /// answers `receipt` to it.
+    fn greeted(
+        peer: &mut UnixStream,
+        receipt: impl FnOnce(&signal_flow::Handshake) -> signal_flow::HandshakeReceipt,
+    ) -> signal_flow::Handshake {
+        let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(
+            &peer.read_flow_frame().unwrap(),
+        )
+        .unwrap();
+        let receipt = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt(&greeting)).unwrap();
+        peer.write_flow_frame(&receipt).unwrap();
+        greeting
+    }
+
+    /// Flow takes one subscription: the accepted connection greets, is
+    /// answered `Greeted`, and then sends its query. Flow is listening from
+    /// here on, so the greeting is answered while the relay's attempt waits
+    /// for it; `accepted` waits for the connection and its query.
+    fn accepting(
+        listener: &UnixListener,
+    ) -> mpsc::Receiver<(UnixStream, signal_flow::Query)> {
         let (taken, take) = mpsc::channel();
         let listener = listener.try_clone().unwrap();
         std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
+            let greeting = greeted(&mut peer, signal_flow::Query::receipt);
+            assert_eq!(greeting, signal_flow::Query::greeting());
             let query = rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(
                 &peer.read_flow_frame().unwrap(),
             )
             .unwrap();
             let _ = taken.send((peer, query));
         });
-        take.recv_timeout(EVENT_WAIT).expect("Flow takes a subscription")
+        take
+    }
+    fn accepted(
+        taking: mpsc::Receiver<(UnixStream, signal_flow::Query)>,
+    ) -> (UnixStream, signal_flow::Query) {
+        taking.recv_timeout(EVENT_WAIT).expect("Flow takes a subscription")
+    }
+
+    /// A Flow that answers the greeting with `receipt` whatever it is, and
+    /// reports what else the peer sent before it closed.
+    fn answering(
+        listener: &UnixListener,
+        receipt: signal_flow::HandshakeReceipt,
+    ) -> mpsc::Receiver<Vec<u8>> {
+        let (rest, read) = mpsc::channel();
+        let listener = listener.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            greeted(&mut peer, |_| receipt);
+            let mut after = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut peer, &mut after);
+            let _ = rest.send(after);
+        });
+        read
+    }
+
+    /// The receipt of a Flow built on another contract, naming its digest.
+    fn refusal() -> signal_flow::HandshakeReceipt {
+        signal_flow::HandshakeReceipt::GreetingRefused(
+            signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(0x60)),
+        )
     }
 
     fn opening(at: i64) -> Vec<u8> {
         let end = signal_flow::TurnEnd {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
-                topic: "core".into(),
+                topic: signal_flow::Topic("core".into()),
                 model: signal_flow::Model::Opus,
             },
             harness_kind: signal_flow::HarnessKind::Claude,
-            flow_id: "ff3882".into(),
-            observed_at: at,
+            flow_id: signal_flow::FlowId("ff3882".into()),
+            observed_at: signal_flow::ObservedAt(at),
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::TurnEndsObserved(vec![end]))
             .unwrap()
@@ -409,7 +556,7 @@ mod tests {
         let attempt = || attempts.recv_timeout(EVENT_WAIT).expect("an attempt");
 
         // Flow absent: looked for once, after the watch is armed.
-        assert_eq!(attempt(), Err(ErrorKind::NotFound));
+        assert_eq!(attempt(), Err(Failed::Transport(ErrorKind::NotFound)));
         // Other files of the place change: no attempt. (Shown by the next
         // attempt, which follows them in the watch's order: it finds the
         // socket bound, so it was made on that event, not on these.)
@@ -419,14 +566,15 @@ mod tests {
         let moved = runtime.join("unlistened");
         let unlistened = bound(&moved);
         std::fs::rename(&moved, &socket).unwrap();
-        assert_eq!(attempt(), Err(ErrorKind::ConnectionRefused));
+        assert_eq!(attempt(), Err(Failed::Transport(ErrorKind::ConnectionRefused)));
         // Flow places its socket over the stale one: made under its
         // temporary name, its mode set, listening (no event of the name's),
         // then moved to its name: that event subscribes, at once.
         let first = placed(&socket);
+        let taking = accepting(&first);
         drop(unlistened);
         assert_eq!(attempt(), Ok(()));
-        let (mut peer, query) = accepted(&first);
+        let (mut peer, query) = accepted(taking);
         assert_eq!(
             query,
             signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
@@ -444,8 +592,9 @@ mod tests {
         // Flow comes back and places its socket. One subscription; its
         // opening reaches the daemon.
         let second = placed(&socket);
+        let taking = accepting(&second);
         assert_eq!(attempt(), Ok(()));
-        let (mut peer, query) = accepted(&second);
+        let (mut peer, query) = accepted(taking);
         assert_eq!(
             query,
             signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
@@ -456,12 +605,12 @@ mod tests {
         let ended = signal_flow::Response::TurnEnded(signal_flow::TurnEnd {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Mind,
-                topic: "energyNexus".into(),
+                topic: signal_flow::Topic("energyNexus".into()),
                 model: signal_flow::Model::Sol,
             },
             harness_kind: signal_flow::HarnessKind::Codex,
-            flow_id: "ff3882".into(),
-            observed_at: 201,
+            flow_id: signal_flow::FlowId("ff3882".into()),
+            observed_at: signal_flow::ObservedAt(201),
         });
         peer.write_flow_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(&ended).unwrap())
             .unwrap();
@@ -491,6 +640,7 @@ mod tests {
         std::fs::create_dir(&runtime).unwrap();
         let socket = runtime.join("flow.sock");
         let listener = placed(&socket);
+        let taking = accepting(&listener);
         let (mut daemon, relay_end) = UnixStream::pair().unwrap();
         daemon.set_read_timeout(Some(EVENT_WAIT)).unwrap();
         let (attempted, attempts) = mpsc::channel();
@@ -499,7 +649,7 @@ mod tests {
             move || TurnEndRelay::start(socket, Counted(attempted), relay_end)
         });
         assert_eq!(attempts.recv_timeout(EVENT_WAIT).unwrap(), Ok(()));
-        let (peer, _) = accepted(&listener);
+        let (peer, _) = accepted(taking);
         // Flow goes and the place's runtime directory is removed: the watch
         // is lost, and the daemon is told the turn ends ended.
         drop(peer);
@@ -508,5 +658,85 @@ mod tests {
         assert_eq!(outcome(&mut daemon), Outcome::Down);
         relay.join().unwrap();
         assert!(attempts.try_recv().is_err(), "no attempt after the first");
+    }
+
+    #[test]
+    fn a_refused_greeting_is_a_typed_failure_and_no_query_is_sent() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("flow.sock");
+        let listener = placed(&socket);
+        let rest = answering(&listener, refusal());
+        match ObserveTurnEnds.subscribe(&socket) {
+            Err(SubscriptionFailure::GreetingRefused(
+                signal_flow::HandshakeRejection::ContractMismatch(digest),
+            )) => assert_eq!(digest, signal_flow::ContractDigest(0x60)),
+            other => panic!("a typed refusal, got {other:?}"),
+        }
+        assert!(
+            rest.recv_timeout(EVENT_WAIT).expect("Flow's connection ends").is_empty(),
+            "nothing follows a refused greeting"
+        );
+    }
+
+    #[test]
+    fn a_greeting_answered_with_another_contract_is_a_typed_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("flow.sock");
+        let listener = placed(&socket);
+        let other = signal_flow::ContractDigest(0x61);
+        let rest = answering(&listener, signal_flow::HandshakeReceipt::Greeted(other));
+        match ObserveTurnEnds.subscribe(&socket) {
+            Err(SubscriptionFailure::GreetedAnotherContract(digest)) => assert_eq!(digest, other),
+            other => panic!("a typed failure, got {other:?}"),
+        }
+        assert!(rest.recv_timeout(EVENT_WAIT).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_flow_that_refuses_the_greeting_is_waited_on_until_its_socket_is_placed_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let socket = runtime.join("flow.sock");
+        let refusing = placed(&socket);
+        let rest = answering(&refusing, refusal());
+        let (mut daemon, relay_end) = UnixStream::pair().unwrap();
+        daemon.set_read_timeout(Some(EVENT_WAIT)).unwrap();
+        let (attempted, attempts) = mpsc::channel();
+        let relay = std::thread::spawn({
+            let socket = socket.clone();
+            move || TurnEndRelay::start(socket, Counted(attempted), relay_end)
+        });
+        let attempt = || attempts.recv_timeout(EVENT_WAIT).expect("an attempt");
+        // The first look is refused at the greeting, and no query follows.
+        assert_eq!(
+            attempt(),
+            Err(Failed::GreetingRefused(
+                signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(
+                    0x60
+                ))
+            ))
+        );
+        assert!(rest.recv_timeout(EVENT_WAIT).unwrap().is_empty());
+        // The relay waits on the socket's next event, not on a timer. A
+        // Flow that greets properly is placed; the next attempt succeeds.
+        std::fs::remove_file(&socket).unwrap();
+        drop(refusing);
+        let second = placed(&socket);
+        let taking = accepting(&second);
+        assert_eq!(attempt(), Ok(()));
+        let (mut peer, query) = accepted(taking);
+        assert_eq!(
+            query,
+            signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+        );
+        peer.write_flow_frame(&opening(300)).unwrap();
+        assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 300));
+        drop(daemon);
+        peer.set_read_timeout(Some(EVENT_WAIT)).unwrap();
+        let mut closed = Vec::new();
+        assert_eq!(std::io::Read::read_to_end(&mut peer, &mut closed).unwrap(), 0);
+        relay.join().unwrap();
+        assert!(attempts.try_recv().is_err(), "no further attempt");
     }
 }

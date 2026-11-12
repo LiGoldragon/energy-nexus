@@ -175,7 +175,7 @@ pub fn turn_end(flow: &signal_flow::TurnEnd) -> TurnEnd {
             signal_flow::HarnessKind::Claude => Provider::Claude,
             signal_flow::HarnessKind::Codex => Provider::Codex,
         },
-        at: Instant(flow.observed_at),
+        at: Instant(flow.observed_at.0),
     }
 }
 /// What one frame from Flow's turn-end subscription says, for the daemon.
@@ -691,7 +691,7 @@ fn send_reminder(
     let address = &recipient.0;
     let datom = format!(
         "Send.{{ {{ {:?} {} {:?} }} Soft.Notice.«Energy {:?} is {:?}.» }}",
-        address.aspect, address.topic, address.model, provider, level
+        address.aspect, address.topic.0, address.model, provider, level
     );
     Command::new(program)
         .arg(datom)
@@ -750,7 +750,7 @@ printf '%s\n' "$1" > {}
         std::fs::set_permissions(&program, permissions).unwrap();
         let recipient = signal_energy_nexus::Recipient(signal_energy_nexus::Address {
             aspect: signal_flow::Aspect::Mind,
-            topic: "energyNexus".into(),
+            topic: signal_flow::Topic("energyNexus".into()),
             model: signal_flow::Model::Sol,
         });
         assert!(send_reminder(
@@ -765,12 +765,12 @@ printf '%s\n' "$1" > {}
             "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }"
         ));
         // The argument is a Query of the Flow contract Energy is built with,
-        // signal-flow 57.0.0: a Send to the configured recipient.
+        // signal-flow 61.0.0: a Send to the configured recipient.
         let query = Potential::<signal_flow::Query>::from(transcript.trim())
             .actualize(&mut budget())
             .expect("the reminder reads as a Flow Query");
         match query {
-            signal_flow::Query::Send(send) => assert_eq!(send.recipient, recipient.0),
+            signal_flow::Query::Send(send) => assert_eq!(send.address, recipient.0),
             other => panic!("a reminder is a Send, got {other:?}"),
         }
     }
@@ -848,12 +848,12 @@ sleep 60
         signal_flow::TurnEnd {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Psyche,
-                topic: "core".into(),
+                topic: signal_flow::Topic("core".into()),
                 model,
             },
             harness_kind,
-            flow_id: "ff3882".into(),
-            observed_at: 1_762_210_000,
+            flow_id: signal_flow::FlowId("ff3882".into()),
+            observed_at: signal_flow::ObservedAt(1_762_210_000),
         }
     }
     #[test]
@@ -902,7 +902,7 @@ sleep 60
                 level: Level::Low,
                 recipient: signal_energy_nexus::Recipient(signal_energy_nexus::Address {
                     aspect: signal_flow::Aspect::Mind,
-                    topic: "energyNexus".into(),
+                    topic: signal_flow::Topic("energyNexus".into()),
                     model: signal_flow::Model::Sol,
                 }),
             }),

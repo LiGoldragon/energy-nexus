@@ -1,5 +1,19 @@
 # Upgrades
 
+## 0.3.2 — signal-flow 61 and the Signal greeting
+
+All five packages move to 0.3.2. No Energy contract or memory change. Branch-only preparation: it is the Energy side of the Flow 0.54.7 rollout and is deployed with it, in the same Home generation.
+
+**Pins.** signal-flow 57.0.0 (`3d0a4cd`) moves to 61.0.0 (`4871bb8`), the contract Flow 0.54.7 is built with. signal moves from 10.3.0 to 11.0.0 (`6d4eb74`): signal-flow 61 depends on it and re-exports the greeting types from it (`Contracted`, `ContractDigest`, `Handshake`, `HandshakeReceipt`, `HandshakeRejection`), and `signal` declares `links = "signal"`, so no second signal can sit beside it. signal-energy-nexus and meta-signal-energy-nexus, which carry signal-flow in their own contracts, move with it to 0.5.0 (`ee48780`, `f79d673`; wire unchanged, Rust types of the recipient change), and the translator's datom-codec and protos move to 09a0526 and c93b598, the pair signal-flow 61 builds with. Energy builds with rust-build and carries no Cargo.nix or build-base pin; Cargo.lock follows.
+
+**Flow's types.** Under signal-flow 61 an `Address` holds a `Topic` newtype, a turn end holds a `FlowId` and an `ObservedAt`, and a `Send` holds `address` and `sendable_message`. The translator reads `observed_at.0` and prints `topic.0` in the reminder's `Send`; the text of the reminder is unchanged.
+
+**The translator greets Flow.** Flow 0.54.7 greets on its ordinary socket as it has on its meta socket since 0.54.6: the first frame of a connection is a `Handshake`, and a Query before the greeting is answered `GreetingRefused.ContractMismatch(<digest>)` and the connection is closed. The translator's subscription now writes `signal_flow::Query::greeting()`, reads one `HandshakeReceipt`, and writes `Observe.TurnEnds` only after `Greeted` naming `signal_flow::Query::contract_digest()`. The wait for the receipt is bounded at 30 seconds.
+
+**A refused greeting is a typed failure.** `subscribe` returns `SubscriptionFailure`: `Transport`, `GreetingRefused(HandshakeRejection)` (Flow's own digest is in the rejection), `GreetedAnotherContract(ContractDigest)` and `ReceiptUnreadable`. A failed subscription is handled as any refused attempt is: the relay logs it and waits for the next `IN_MOVED_TO` of `flow.sock`, so Energy runs on from memory without Flow's turn ends. A translator built on signal-flow 57 against Flow 0.54.7 is such a refused peer, which is why this change deploys with Flow 0.54.7.
+
+**Tests.** The fake Flows of the translator and the daemon answer the greeting before reading the subscription. New: a refused greeting and a `Greeted` naming another contract are typed failures with no query sent, and a relay refused at the greeting waits for the socket's next placing and then subscribes.
+
 ## 0.3.1 — Energy outlives Flow; window resets on the wall clock
 
 All five packages move to 0.3.1. No contract or memory change.

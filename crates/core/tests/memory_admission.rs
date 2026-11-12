@@ -373,7 +373,7 @@ fn version_one_file() -> Vec<u8> {
                 level: Level::Low,
                 recipient: Recipient(Address {
                     aspect: signal_flow::Aspect::Mind,
-                    topic: "energyNexus".into(),
+                    topic: signal_flow::Topic("energyNexus".into()),
                     model: signal_flow::Model::Sol,
                 }),
             }],

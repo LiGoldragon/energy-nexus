@@ -41,6 +41,20 @@ fn write_flow_frame(stream: &mut UnixStream, bytes: &[u8]) {
     stream.write_all(bytes).unwrap();
 }
 
+/// Flow as signal-flow 61 plays it: the connection greets first, and is
+/// answered with the receipt for the contract Flow was built with.
+fn greeted(stream: &mut UnixStream) {
+    use signal_flow::Contracted;
+    let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(
+        &flow_frame(stream),
+    )
+    .unwrap();
+    assert_eq!(greeting, signal_flow::Query::greeting());
+    let receipt =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting)).unwrap();
+    write_flow_frame(stream, &receipt);
+}
+
 /// A Codex stand-in: notes each rate-limit read in `log`, then answers one
 /// window that resets in an hour.
 fn fake_codex(directory: &std::path::Path, log: &std::path::Path) -> std::path::PathBuf {
@@ -106,6 +120,7 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
     let turn_ended_at = unix_now() - 5;
     std::thread::spawn(move || {
         let (mut peer, _) = flow.accept().unwrap();
+        greeted(&mut peer);
         let query =
             rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(&flow_frame(&mut peer))
                 .unwrap();
@@ -114,12 +129,12 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
         let codex_end = signal_flow::TurnEnd {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Mind,
-                topic: "energyNexus".into(),
+                topic: signal_flow::Topic("energyNexus".into()),
                 model: signal_flow::Model::Sol,
             },
             harness_kind: signal_flow::HarnessKind::Codex,
-            flow_id: "ff3882".into(),
-            observed_at: turn_ended_at,
+            flow_id: signal_flow::FlowId("ff3882".into()),
+            observed_at: signal_flow::ObservedAt(turn_ended_at),
         };
         let frame = rkyv::to_bytes::<rkyv::rancor::Error>(
             &signal_flow::Response::TurnEndsObserved(vec![codex_end]),
