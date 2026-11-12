@@ -28,10 +28,69 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How long Flow has to answer the greeting. A Flow that accepted the
-/// connection and says nothing is a failed subscription, which waits for
+/// How long one read of Flow's answer to the greeting may wait. It is the
+/// read timeout of the connection (`SO_RCVTIMEO`), so it bounds each read
+/// of the receipt and not the greeting as a whole: a Flow that sends no byte
+/// for this long has failed the subscription, while a Flow that sends the
+/// receipt's bytes one at a time, each sooner than this, is waited on as
+/// long as it goes on. No absolute deadline is kept for the handshake.
+/// A Flow that accepted the connection and says nothing is a failed
+/// subscription (`SubscriptionFailure::GreetingUnanswered`), which waits for
 /// the socket's next event like any other.
-const GREETING_WAIT: Duration = Duration::from_secs(30);
+///
+/// The wait is a configured input of the translator: its optional fourth
+/// start argument, whole seconds (`energy-translator NAME RUNTIME STATE
+/// [GREETING_WAIT_SECONDS]`), and `GreetingWait::default()`, thirty seconds,
+/// where none is given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GreetingWait(Duration);
+impl GreetingWait {
+    /// The wait where none is configured.
+    pub const DEFAULT_SECONDS: u64 = 30;
+    /// A wait of `duration`, which a read timeout cannot take as zero.
+    pub fn new(duration: Duration) -> Result<Self, GreetingWaitRefusal> {
+        if duration.is_zero() {
+            Err(GreetingWaitRefusal::Zero)
+        } else {
+            Ok(Self(duration))
+        }
+    }
+    pub fn duration(&self) -> Duration {
+        self.0
+    }
+}
+impl Default for GreetingWait {
+    fn default() -> Self {
+        Self(Duration::from_secs(Self::DEFAULT_SECONDS))
+    }
+}
+/// A configured greeting wait is whole seconds.
+impl std::str::FromStr for GreetingWait {
+    type Err = GreetingWaitRefusal;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let seconds = text
+            .parse::<u64>()
+            .map_err(|_| GreetingWaitRefusal::NotWholeSeconds(text.to_owned()))?;
+        Self::new(Duration::from_secs(seconds))
+    }
+}
+/// Why a configured greeting wait is refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GreetingWaitRefusal {
+    /// A read timeout of zero would wait for nothing.
+    Zero,
+    NotWholeSeconds(String),
+}
+impl std::fmt::Display for GreetingWaitRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Zero => write!(formatter, "the greeting wait is zero seconds"),
+            Self::NotWholeSeconds(text) => {
+                write!(formatter, "the greeting wait {text:?} is not whole seconds")
+            }
+        }
+    }
+}
 
 /// Why one subscription was not opened. Each is a failed attempt; the
 /// relay waits for the next event of Flow's socket.
@@ -48,6 +107,10 @@ pub enum SubscriptionFailure {
     GreetedAnotherContract(signal_flow::ContractDigest),
     /// Flow's answer to the greeting is no `HandshakeReceipt`.
     ReceiptUnreadable(String),
+    /// A read of Flow's answer to the greeting waited the configured
+    /// `GreetingWait` and got no byte. The wait is per read: see
+    /// `GreetingWait`. No query was sent.
+    GreetingUnanswered(GreetingWait),
 }
 impl From<std::io::Error> for SubscriptionFailure {
     fn from(error: std::io::Error) -> Self {
@@ -67,22 +130,40 @@ impl std::fmt::Display for SubscriptionFailure {
             Self::ReceiptUnreadable(reason) => {
                 write!(formatter, "Flow's greeting receipt is unreadable: {reason}")
             }
+            Self::GreetingUnanswered(wait) => write!(
+                formatter,
+                "Flow sent no byte of the greeting receipt for {:?}",
+                wait.duration()
+            ),
         }
     }
 }
 
 /// Writes signal-flow's greeting and reads the receipt: Ok on `Greeted`
-/// naming the digest of the contract this translator was built with.
+/// naming the digest of the contract this translator was built with. Each
+/// read of the receipt waits at most `wait`; the whole handshake has no
+/// deadline.
 pub trait GreetsFlowNexus {
-    fn greet_flow(&mut self) -> Result<(), SubscriptionFailure>;
+    fn greet_flow(&mut self, wait: GreetingWait) -> Result<(), SubscriptionFailure>;
 }
 impl GreetsFlowNexus for UnixStream {
-    fn greet_flow(&mut self) -> Result<(), SubscriptionFailure> {
+    fn greet_flow(&mut self, wait: GreetingWait) -> Result<(), SubscriptionFailure> {
         let greeting = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         self.write_flow_frame(&greeting)?;
-        self.set_read_timeout(Some(GREETING_WAIT))?;
-        let frame = self.read_flow_frame()?;
+        self.set_read_timeout(Some(wait.duration()))?;
+        let frame = match self.read_flow_frame() {
+            Ok(frame) => frame,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(SubscriptionFailure::GreetingUnanswered(wait))
+            }
+            Err(error) => return Err(error.into()),
+        };
         self.set_read_timeout(None)?;
         match rkyv::from_bytes::<signal_flow::HandshakeReceipt, rkyv::rancor::Error>(&frame) {
             Ok(signal_flow::HandshakeReceipt::Greeted(digest))
@@ -107,15 +188,17 @@ pub trait SubscribesToFlow: Send + 'static {
     fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure>;
 }
 /// The subscription as Flow 0.54.7 takes it (signal-flow 61): the greeting,
-/// then `Observe.TurnEnds`.
-pub struct ObserveTurnEnds;
+/// whose receipt each read waits for `greeting_wait`, then `Observe.TurnEnds`.
+pub struct ObserveTurnEnds {
+    pub greeting_wait: GreetingWait,
+}
 impl SubscribesToFlow for ObserveTurnEnds {
     fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure> {
         let query = signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds);
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let mut flow = UnixStream::connect(socket)?;
-        flow.greet_flow()?;
+        flow.greet_flow(self.greeting_wait)?;
         flow.write_flow_frame(&bytes)?;
         Ok(flow)
     }
@@ -403,7 +486,7 @@ mod tests {
     struct Counted(mpsc::Sender<Result<(), Failed>>);
     impl SubscribesToFlow for Counted {
         fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure> {
-            let result = ObserveTurnEnds.subscribe(socket);
+            let result = observing(GreetingWait::default()).subscribe(socket);
             let _ = self.0.send(result.as_ref().map(|_| ()).map_err(|failure| match failure {
                 SubscriptionFailure::Transport(error) => Failed::Transport(error.kind()),
                 SubscriptionFailure::GreetingRefused(rejection) => {
@@ -507,11 +590,45 @@ mod tests {
         read
     }
 
+    fn observing(greeting_wait: GreetingWait) -> ObserveTurnEnds {
+        ObserveTurnEnds { greeting_wait }
+    }
+
     /// The receipt of a Flow built on another contract, naming its digest.
     fn refusal() -> signal_flow::HandshakeReceipt {
         signal_flow::HandshakeReceipt::GreetingRefused(
             signal_flow::HandshakeRejection::ContractMismatch(signal_flow::ContractDigest(0x60)),
         )
+    }
+
+    /// A Flow that reads the greeting, waits `delay` and then answers
+    /// `Greeted` with its own digest, or never answers when `delay` is
+    /// `None`; it reports when it read the greeting and what else the peer
+    /// sent before it closed or Flow gave up waiting.
+    fn slow(
+        listener: &UnixListener,
+        delay: Option<Duration>,
+    ) -> mpsc::Receiver<Vec<u8>> {
+        let (rest, read) = mpsc::channel();
+        let listener = listener.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(
+                &peer.read_flow_frame().unwrap(),
+            )
+            .unwrap();
+            if let Some(delay) = delay {
+                std::thread::sleep(delay);
+                let receipt =
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting))
+                        .unwrap();
+                let _ = peer.write_flow_frame(&receipt);
+            }
+            let mut after = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut peer, &mut after);
+            let _ = rest.send(after);
+        });
+        read
     }
 
     fn opening(at: i64) -> Vec<u8> {
@@ -666,7 +783,7 @@ mod tests {
         let socket = directory.path().join("flow.sock");
         let listener = placed(&socket);
         let rest = answering(&listener, refusal());
-        match ObserveTurnEnds.subscribe(&socket) {
+        match observing(GreetingWait::default()).subscribe(&socket) {
             Err(SubscriptionFailure::GreetingRefused(
                 signal_flow::HandshakeRejection::ContractMismatch(digest),
             )) => assert_eq!(digest, signal_flow::ContractDigest(0x60)),
@@ -685,11 +802,93 @@ mod tests {
         let listener = placed(&socket);
         let other = signal_flow::ContractDigest(0x61);
         let rest = answering(&listener, signal_flow::HandshakeReceipt::Greeted(other));
-        match ObserveTurnEnds.subscribe(&socket) {
+        match observing(GreetingWait::default()).subscribe(&socket) {
             Err(SubscriptionFailure::GreetedAnotherContract(digest)) => assert_eq!(digest, other),
             other => panic!("a typed failure, got {other:?}"),
         }
         assert!(rest.recv_timeout(EVENT_WAIT).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_greeting_wait_is_whole_seconds_with_a_default_of_thirty() {
+        assert_eq!(GreetingWait::default().duration(), Duration::from_secs(30));
+        assert_eq!("45".parse::<GreetingWait>().unwrap().duration(), Duration::from_secs(45));
+        assert_eq!("0".parse::<GreetingWait>(), Err(GreetingWaitRefusal::Zero));
+        for text in ["", "1.5", "-3", "thirty"] {
+            assert_eq!(
+                text.parse::<GreetingWait>(),
+                Err(GreetingWaitRefusal::NotWholeSeconds(text.into())),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flow_that_never_answers_the_greeting_is_a_typed_timeout_and_no_query_is_sent() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("flow.sock");
+        let listener = placed(&socket);
+        let rest = slow(&listener, None);
+        let wait = GreetingWait::new(Duration::from_millis(150)).unwrap();
+        let begun = std::time::Instant::now();
+        match observing(wait).subscribe(&socket) {
+            Err(SubscriptionFailure::GreetingUnanswered(waited)) => assert_eq!(waited, wait),
+            other => panic!("a typed timeout, got {other:?}"),
+        }
+        assert!(
+            begun.elapsed() < Duration::from_secs(10),
+            "the configured wait ended it, not the default's thirty seconds"
+        );
+        // The failed subscription's connection is closed with nothing after
+        // the greeting: no Query was sent.
+        assert!(
+            rest.recv_timeout(EVENT_WAIT).expect("the connection ends").is_empty(),
+            "nothing follows an unanswered greeting"
+        );
+    }
+
+    #[test]
+    fn the_configured_greeting_wait_is_the_one_honoured() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("flow.sock");
+        let listener = placed(&socket);
+        let delay = Duration::from_millis(1500);
+        // A wait shorter than Flow's answer fails, typed, with that wait.
+        let rest = slow(&listener, Some(delay));
+        let short = GreetingWait::new(Duration::from_millis(200)).unwrap();
+        assert!(matches!(
+            observing(short).subscribe(&socket),
+            Err(SubscriptionFailure::GreetingUnanswered(waited)) if waited == short
+        ));
+        assert!(rest.recv_timeout(EVENT_WAIT).unwrap().is_empty());
+        // A wait longer than the same answer opens the subscription, and the
+        // Query follows the greeting.
+        let (taken, take) = mpsc::channel();
+        let listening = listener.try_clone().unwrap();
+        std::thread::spawn(move || {
+            let (mut peer, _) = listening.accept().unwrap();
+            let greeting = rkyv::from_bytes::<signal_flow::Handshake, rkyv::rancor::Error>(
+                &peer.read_flow_frame().unwrap(),
+            )
+            .unwrap();
+            std::thread::sleep(delay);
+            let receipt =
+                rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting))
+                    .unwrap();
+            peer.write_flow_frame(&receipt).unwrap();
+            let query = rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(
+                &peer.read_flow_frame().unwrap(),
+            )
+            .unwrap();
+            let _ = taken.send((peer, query));
+        });
+        let long = GreetingWait::new(Duration::from_secs(20)).unwrap();
+        let _flow = observing(long).subscribe(&socket).expect("a subscription");
+        let (_peer, query) = accepted(take);
+        assert_eq!(
+            query,
+            signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+        );
     }
 
     #[test]

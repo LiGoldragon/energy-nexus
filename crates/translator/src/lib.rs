@@ -58,6 +58,8 @@ impl Persisted for Programs {
 pub struct Translator {
     pub place: Place,
     pub programs: Arc<Mutex<Programs>>,
+    /// How long each read of Flow's greeting receipt waits (`flow::GreetingWait`).
+    pub greeting_wait: flow::GreetingWait,
 }
 pub trait Translating {
     /// One external call: every emission but `TurnEnds`, which is held open
@@ -304,12 +306,19 @@ impl Translator {
     /// Outcome in Energy's words, and when Flow goes waits for its socket to
     /// appear and subscribes again on that event (`flow::TurnEndRelay`).
     fn relay_turn_ends(&self, daemon: UnixStream) {
-        flow::TurnEndRelay::start(self.flow_socket(), flow::ObserveTurnEnds, daemon)
+        flow::TurnEndRelay::start(
+            self.flow_socket(),
+            flow::ObserveTurnEnds {
+                greeting_wait: self.greeting_wait,
+            },
+            daemon,
+        )
     }
-    /// The translator process at its place, with its memory: an archive
-    /// written before the envelope is upgraded on open, and a memory that
-    /// cannot be read keeps the translator from starting.
-    pub fn open(place: Place) -> Result<Self, MemoryRefusal> {
+    /// The translator process at its place, with its memory and its
+    /// configured greeting wait: an archive written before the envelope is
+    /// upgraded on open, and a memory that cannot be read keeps the
+    /// translator from starting.
+    pub fn open(place: Place, greeting_wait: flow::GreetingWait) -> Result<Self, MemoryRefusal> {
         let path = place.translator_memory();
         let admission = Programs::load(&path)?;
         if matches!(admission, energy_nexus_wire::Admission::Upgraded(..)) {
@@ -321,6 +330,7 @@ impl Translator {
         Ok(Self {
             place,
             programs: Arc::new(Mutex::new(Upgrade::from(admission).memory)),
+            greeting_wait,
         })
     }
     /// A text client of the place: it reaches the translator's sockets and
@@ -329,6 +339,7 @@ impl Translator {
         Self {
             place,
             programs: Arc::new(Mutex::new(Programs::default())),
+            greeting_wait: flow::GreetingWait::default(),
         }
     }
     /// A translator setting is saved and only then made the one in use.
@@ -806,6 +817,7 @@ sleep 60
                 codex: Some(program.to_str().unwrap().into()),
                 ..Programs::default()
             })),
+            greeting_wait: flow::GreetingWait::default(),
         };
         let value = translator.codex_call("account/rateLimits/read", json!({})).unwrap();
         assert_eq!(value, json!({"ok":true}));

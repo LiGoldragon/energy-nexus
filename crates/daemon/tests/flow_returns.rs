@@ -175,6 +175,7 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
             codex: Some(codex.to_str().unwrap().into()),
             ..Programs::default()
         })),
+        greeting_wait: energy_nexus_translator::flow::GreetingWait::default(),
     };
     let listening = translator.bind().unwrap();
     std::thread::spawn(move || listening.run());

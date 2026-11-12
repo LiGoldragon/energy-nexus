@@ -213,3 +213,38 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
     assert_eq!(read().flow.as_deref(), Some("/home/li/.local/bin/flow-nexus"));
     assert!(running.stop().success());
 }
+
+#[test]
+fn a_configured_greeting_wait_is_taken_at_start_and_a_bad_one_keeps_the_translator_from_starting() {
+    let shared = SharedPlace::declared();
+    // Whole seconds as the optional fourth argument: the translator starts.
+    let notify_directory = tempfile::tempdir().unwrap();
+    let notify_path = notify_directory.path().join("notify.sock");
+    let notify = UnixDatagram::bind(&notify_path).unwrap();
+    notify.set_read_timeout(Some(EVENT_WAIT)).unwrap();
+    let child = SharedPlace::command(&shared.place)
+        .arg("5")
+        .env("NOTIFY_SOCKET", &notify_path)
+        .spawn()
+        .unwrap();
+    let running = Running::started(child);
+    let mut message = [0_u8; 64];
+    let length = notify.recv(&mut message).expect("readiness with a configured wait");
+    assert_eq!(&message[..length], b"READY=1");
+    assert!(running.stop().success());
+    // Zero and anything that is not whole seconds are refused before any
+    // socket is placed.
+    for refused in ["0", "1.5", "soon"] {
+        let output = SharedPlace::command(&shared.place)
+            .arg(refused)
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{refused:?} is refused");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("greeting wait"), "{refused:?}: {stderr}");
+        for socket in shared.own() {
+            assert!(!socket.exists(), "{refused:?}: {} was placed", socket.display());
+        }
+    }
+}

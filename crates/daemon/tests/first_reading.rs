@@ -153,6 +153,7 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
             codex: Some(codex.to_str().unwrap().into()),
             ..Programs::default()
         })),
+        greeting_wait: energy_nexus_translator::flow::GreetingWait::default(),
     };
     let listening = translator.bind().unwrap();
     std::thread::spawn(move || listening.run());
