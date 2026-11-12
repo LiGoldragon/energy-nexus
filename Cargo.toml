@@ -7,8 +7,8 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "ee4878059d79f093dc0d869f145e4a832938a787", default-features = false }
-meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "f79d673d10927bd8d9dbea652436f2129a2ac54e", default-features = false }
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "7ca10ebccdc674bbd96489ceff3e2a43d32d6ec3", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "3264d6f36013ca823b60bdfbc3e10c5f6370f482", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "4871bb81c1119fe72dc76168a97e1e576411b831", default-features = false }
 tokio = { version = "1", default-features = false }
