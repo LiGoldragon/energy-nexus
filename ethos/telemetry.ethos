@@ -1,0 +1,16 @@
+Library
+[ :signal_energy_nexus:library:[ AttemptId Provider Instant Failure RedemptionResult ] ] ; typed observation context
+[ Trigger.[ Subscription TurnEnded WindowReset ExplicitRead Redemption ] ; actual existing demand causes
+  DemandCount.Integer                                     ; positive count, overflow is an explicit reporting fault
+  TriggerDemand.{ Trigger DemandCount }                    ; merged demand retains each cause
+  AttemptContext.{ AttemptId Vector<TriggerDemand> } ; no arbitrary request or credential fields
+  DurationMilliseconds.Integer                            ; monotonic elapsed duration
+  AttemptOutcome.[ Observed Failure.Failure RedemptionResult.RedemptionResult ]     ; bounded completion, no raw response
+  AttemptRecord.[ Started.{ Provider AttemptContext Instant }       ; one logical provider call entered after preparation
+                  Rejected.{ Provider AttemptContext Instant Failure } ; preparation failed before call
+                  Completed.{ AttemptId Instant DurationMilliseconds AttemptOutcome } ] ; may be absent after abrupt crash
+  ReportingFailure.[ SinkUnavailable CountOverflow ClockUnavailable ] ; never causes another provider call
+  ReportResult.[ Written ReportingFailure ] ] ; never causes another provider call
+[ AttemptReporting.[ record.[ AttemptRecord ] ]            ; request is the record to report
+  AttemptReportable.[ report!{ [ AttemptReporting ] [ ReportResult ] } ] ] ; owner carries record and its reporter configuration
+[ AttemptRecord.[ AttemptReporting ] ]                    ; the request projects its own record

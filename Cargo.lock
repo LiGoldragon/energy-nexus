@@ -181,8 +181,10 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-emission"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
+ "datom-codec 0.33.1",
+ "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
  "rkyv",
  "signal",
  "signal-energy-nexus",
@@ -210,11 +212,14 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-wire"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
+ "energy-nexus-emission",
+ "meta-signal-energy-nexus",
  "nix",
  "rkyv",
  "signal",
+ "signal-energy-nexus",
  "tempfile",
 ]
 

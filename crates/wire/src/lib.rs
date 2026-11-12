@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 mod memory;
+mod connection;
+pub use connection::*;
 pub use memory::{Admission, Earlier, Envelope, MemoryRefusal, Persisted, Upgrade};
 pub const CAPACITY: usize = 4 * 1024 * 1024;
 pub trait Framing {

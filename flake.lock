@@ -170,17 +170,17 @@
     "tests": {
       "flake": false,
       "locked": {
-        "lastModified": 1794519539,
-        "narHash": "sha256-Init/cQXcNdi25tElmrxRt2RUIiffYx9T/S/LjYRiAk=",
+        "lastModified": 1794520056,
+        "narHash": "sha256-TJpaAdrNIIFlhy63GRlSgG4FoSWpxT7hZlOqmniqRQk=",
         "owner": "LiGoldragon",
         "repo": "energy-nexus-tests",
-        "rev": "90461af957e69f3fd8e439df0cdcf1ce88016133",
+        "rev": "0244073731c197b1d602dbdab7289a27b34abe6a",
         "type": "github"
       },
       "original": {
         "owner": "LiGoldragon",
         "repo": "energy-nexus-tests",
-        "rev": "90461af957e69f3fd8e439df0cdcf1ce88016133",
+        "rev": "0244073731c197b1d602dbdab7289a27b34abe6a",
         "type": "github"
       }
     }

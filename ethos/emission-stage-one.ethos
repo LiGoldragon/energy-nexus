@@ -1,0 +1,14 @@
+Signal
+[ :signal_energy_nexus:library:[ Provider ReadingResult RedemptionId ResetId RedemptionOutcome Failure Reminder Instant Caller ] ; typed domain values, no provider text
+  :crate:telemetry:AttemptContext ]                        ; logical-attempt identity and merged causes
+[ Emit.Emission ]                                         ; attempts one typed external capability
+[ Emitted.EmissionOutcome ]                               ; typed observation, not a provider body
+[ ProviderRead.{ Provider AttemptContext }                 ; provider belongs to the demand once
+  ConsumeRequest.{ RedemptionId ResetId AttemptContext }   ; metadata stays in daemon Memory; call carries only required identity
+  SubmissionEvidence.[ NotSubmitted PossiblySubmitted ]    ; transport evidence, not an inference of provider effect
+  ConsumeFailure.{ RedemptionId SubmissionEvidence Failure } ; correlation survives uncertain execution
+  ConsumeReply.[ Completed.{ RedemptionId RedemptionOutcome } ConsumeFailure ] ; no repeated selected credit or result
+  ReminderRequest.{ Reminder AttemptContext }              ; typed Flow emission
+  Emission.[ ProviderRead ConsumeRequest ReminderRequest TurnEnds ] ; one external capability per variant
+  TurnEnd.{ Provider Instant }                            ; one observed provider turn-end event
+  EmissionOutcome.[ ReadingResult.ReadingResult ConsumeReply Sent TurnEndsObserved.Vector<TurnEnd> TurnEnd Failure.Failure ] ] ; no Down collapse
