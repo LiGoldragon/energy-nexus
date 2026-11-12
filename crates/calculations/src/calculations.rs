@@ -19,7 +19,8 @@ impl CreditSelectable for CreditSelection {
         }
         let resets = match &known.reset_details {
             ResetDetails::Complete(resets) => resets,
-            ResetDetails::Partial(_) | ResetDetails::Unknown => {
+            ResetDetails::Partial(_) => return SelectionResult::Unproved,
+            ResetDetails::Unknown => {
                 return if known.available_count.0 == 0 {
                     SelectionResult::NoReset
                 } else {
@@ -117,11 +118,16 @@ impl Levellable for LevelCalculation {
                 Usage::Percent(_) | Usage::Unknown => return Level::Unknown,
             }
         }
-        if self.threshold_vector.iter().any(|threshold| {
-            matches!(threshold.level, Level::Out | Level::Unknown)
+        let mut boundaries = std::collections::HashMap::new();
+        for threshold in &self.threshold_vector {
+            if matches!(threshold.level, Level::Out | Level::Unknown)
                 || !(0..=100).contains(&threshold.left.0)
-        }) {
-            return Level::Unknown;
+                || boundaries
+                    .insert(threshold.left.0, &threshold.level)
+                    .is_some_and(|previous| previous != &threshold.level)
+            {
+                return Level::Unknown;
+            }
         }
         let left = 100 - maximum_used;
         self.threshold_vector
