@@ -1,0 +1,14 @@
+Library
+[ :signal_energy_nexus:library:[ Credits Allowance Percent Instant Reset Reading Threshold Window Provider Target Pace Level ] ; observed domain inputs
+  :meta_signal_energy_nexus:library:[ RedeemExpiring RedeemUsedAtLeast ] ] ; all configured rule inputs
+[ WeekUsage.[ Percent.Percent Unknown ]                            ; weekly evidence is not a hardwired threshold
+  CreditSelection.{ Credits Allowance Instant RedeemExpiring RedeemUsedAtLeast WeekUsage } ; complete existing policy inputs
+  SelectionResult.[ Reset.Reset NoReset Unproved RuleRefused ]    ; ordering failure is not no credit
+  LevelCalculation.{ Reading Vector<Threshold> }            ; observation with policy supplied explicitly
+  PaceCalculation.{ Provider Window Target Instant } ]     ; window target and comparison time
+[ CreditSelectable.[ select.[ SelectionResult ] ]          ; pure eligibility/order, no external effect
+  Levellable.[ level.[ Level ] ]                           ; reports Unknown when required evidence is absent
+  PaceCalculable.[ pace.[ Pace ] ] ]                       ; calculates or names missing evidence
+[ CreditSelection.[ CreditSelectable ]                    ; capabilities belong to data-bearing types
+  LevelCalculation.[ Levellable ]
+  PaceCalculation.[ PaceCalculable ] ]

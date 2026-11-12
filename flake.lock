@@ -93,7 +93,8 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
-        "rust-build": "rust-build"
+        "rust-build": "rust-build",
+        "tests": "tests"
       }
     },
     "rust-analyzer-src": {
@@ -163,6 +164,23 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "tests": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794519111,
+        "narHash": "sha256-B3VqGBZ/7qNrBUwB6dkcoLnFWjtp/XD2UcurGfNGn5Y=",
+        "owner": "LiGoldragon",
+        "repo": "energy-nexus-tests",
+        "rev": "93cfe1a3d7e96c4ba43f0a4c3385fe95bfb23aea",
+        "type": "github"
+      },
+      "original": {
+        "owner": "LiGoldragon",
+        "repo": "energy-nexus-tests",
+        "rev": "93cfe1a3d7e96c4ba43f0a4c3385fe95bfb23aea",
         "type": "github"
       }
     }

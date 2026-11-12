@@ -139,6 +139,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
+name = "energy-nexus-calculations"
+version = "0.4.0"
+dependencies = [
+ "datom-codec 0.33.1",
+ "meta-signal-energy-nexus",
+ "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
+ "rkyv",
+ "signal-energy-nexus",
+]
+
+[[package]]
 name = "energy-nexus-core"
 version = "0.3.2"
 dependencies = [
@@ -415,8 +426,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-energy-nexus"
-version = "0.5.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=3264d6f36013ca823b60bdfbc3e10c5f6370f482#3264d6f36013ca823b60bdfbc3e10c5f6370f482"
+version = "0.6.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=7feb6d50ac56bcb6fed5f4de6117abbd038e3278#7feb6d50ac56bcb6fed5f4de6117abbd038e3278"
 dependencies = [
  "datom-codec 0.33.1",
  "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
@@ -746,8 +757,8 @@ dependencies = [
 
 [[package]]
 name = "signal-energy-nexus"
-version = "0.5.0"
-source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=7ca10ebccdc674bbd96489ceff3e2a43d32d6ec3#7ca10ebccdc674bbd96489ceff3e2a43d32d6ec3"
+version = "0.6.0"
+source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=b77aecd381d0e2634dd46ab4fe43358b5c64fe9c#b77aecd381d0e2634dd46ab4fe43358b5c64fe9c"
 dependencies = [
  "datom-codec 0.33.1",
  "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",

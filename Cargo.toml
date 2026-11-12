@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/emission", "crates/wire", "crates/daemon", "crates/translator"]
+members = ["crates/calculations", "crates/core", "crates/emission", "crates/wire", "crates/daemon", "crates/translator"]
 resolver = "2"
 
 [workspace.package]
@@ -7,8 +7,8 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "7ca10ebccdc674bbd96489ceff3e2a43d32d6ec3", default-features = false }
-meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "3264d6f36013ca823b60bdfbc3e10c5f6370f482", default-features = false }
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "b77aecd381d0e2634dd46ab4fe43358b5c64fe9c", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "7feb6d50ac56bcb6fed5f4de6117abbd038e3278", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "4871bb81c1119fe72dc76168a97e1e576411b831", default-features = false }
 tokio = { version = "1", default-features = false }

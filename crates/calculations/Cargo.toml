@@ -1,0 +1,16 @@
+[package]
+name = "energy-nexus-calculations"
+version = "0.4.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+datom = ["dep:datom-codec", "dep:protos", "signal-energy-nexus/datom", "meta-signal-energy-nexus/datom"]
+
+[dependencies]
+signal-energy-nexus.workspace = true
+meta-signal-energy-nexus.workspace = true
+rkyv.workspace = true
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598", optional = true }
