@@ -12,6 +12,8 @@ No Energy wire or memory change. Repins signal-energy-nexus to `e0eb9b7` and met
 
 **The translator's Memory and the CLI configuration generated.** `ethos/programs.ethos`, the translator's own Memory root, generates `Programs.{ CodexProgram FlowProgram ClaudeCredentials }` (each an `Option<String>` newtype; `impl Default` by hand), and `ethos/cli.ethos`, a Library, generates `CliConfiguration.{ PlaceName }` and `ConfigurationRefusal` (its `Unreadable` and `Invalid` carry one named `RefusedFile.{ ConfigurationPath Reason }`), both into `crates/translator/src/generated/`, checked by the translator's `build.rs`. `energy-translator.rkyv` stays format version 1, byte for byte, and the configuration datom and every refusal print as before (`crates/translator/tests/hand_and_generated.rs`).
 
+**The reminder is Flow's typed Send.** The translator builds `signal_flow::Input::Send(SendRequest { address, Soft(Notice(…)) })` and passes its datom, printed on one line, to the configured Flow client; the text is the one the `format!` wrote, `Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }`.
+
 **Still hand-written here** (later steps): the emission contract of `crates/emission`.
 
 ## 0.3.3 — signal-flow 63: Input and Output

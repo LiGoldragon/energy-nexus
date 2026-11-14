@@ -703,17 +703,23 @@ fn consume_outcome(value: &Value, reset_id: ResetId) -> Outcome {
         _ => Outcome::Down,
     }
 }
+/// Sends one reminder through the configured Flow client, as Flow's own
+/// typed `Send`, written as its datom.
 fn send_reminder(
     program: &str,
     recipient: &signal_energy_nexus::Recipient,
     provider: &Provider,
     level: &Level,
 ) -> bool {
-    let address = &recipient.0;
-    let datom = format!(
-        "Send.{{ {{ {:?} {} {:?} }} Soft.Notice.«Energy {:?} is {:?}.» }}",
-        address.aspect, address.topic.0, address.model, provider, level
-    );
+    use datom_codec::Datomizable;
+    use protos::{Compactable, Protosizable};
+    let send = signal_flow::Input::Send(signal_flow::SendRequest {
+        address: recipient.0.clone(),
+        sendable_message: signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Notice(
+            format!("Energy {provider:?} is {level:?}."),
+        )),
+    });
+    let datom = send.datomize(Vec::new()).protosize().compact();
     Command::new(program)
         .arg(datom)
         .status()
@@ -782,9 +788,11 @@ printf '%s\n' "$1" > {}
         ));
         let transcript = std::fs::read_to_string(log).unwrap();
         println!("flow reminder fixture: {}", transcript.trim());
-        assert!(transcript.contains(
-            "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }"
-        ));
+        assert_eq!(
+            transcript,
+            "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }\n",
+            "the reminder is the datom it was before it was typed"
+        );
         // The argument is an Input of the Flow contract Energy is built with,
         // signal-flow 63.0.0: a Send to the configured recipient.
         let input = Potential::<signal_flow::Input>::from(transcript.trim())
