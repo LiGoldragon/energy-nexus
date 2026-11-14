@@ -193,7 +193,7 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_served() {
     );
     assert!(report.contains("carried as Even: the Week window of the latest reading does not hold that instant"));
     assert!(
-        report.contains("energy-nexus: window target Claude FableWeek dropped: a target is the Week window alone; it was Even"),
+        report.contains("energy-nexus: window target Claude FableWeek dropped: a target is the provider's, for its Week and FableWeek windows; it was Even"),
         "a stored window target is dropped with a log line"
     );
     let bytes = std::fs::read(shared.place.memory()).unwrap();

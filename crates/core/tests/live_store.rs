@@ -74,7 +74,7 @@ fn every_live_copy_is_read_whole_and_written_back() {
             for target in &old.configuration.window_targets {
                 println!("    {:?} {:?} {:?}", target.provider, target.name, target.target);
             }
-            println!("  version 4 targets after (a target is the Week window alone):");
+            println!("  version 4 targets after (a target is the provider's, governing Week and FableWeek):");
             for target in &memory.configuration().targets.0 {
                 println!("    {:?} {:?}", target.provider, target.target);
             }

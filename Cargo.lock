@@ -458,7 +458,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-energy-nexus"
 version = "0.7.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=33ec917a538dd847d276485a7498c3787f4b5c24#33ec917a538dd847d276485a7498c3787f4b5c24"
+source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=5ae4e3e219c60c1b2769a535b8e4dcba969dd739#5ae4e3e219c60c1b2769a535b8e4dcba969dd739"
 dependencies = [
  "datom-codec",
  "ethos-zero 28.0.0",
@@ -797,7 +797,7 @@ dependencies = [
 [[package]]
 name = "signal-energy-nexus"
 version = "0.7.0"
-source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=16c7ad974949df2090ed4c8704b323e49e22a65c#16c7ad974949df2090ed4c8704b323e49e22a65c"
+source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=869c8d79152974b30e4f21c3b5cb2c3fb60584a8#869c8d79152974b30e4f21c3b5cb2c3fb60584a8"
 dependencies = [
  "datom-codec",
  "ethos-zero 28.0.0",

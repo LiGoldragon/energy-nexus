@@ -1,8 +1,8 @@
 //! A `SpendBy` target is stated against the window's reset: so many hours
 //! before it, a percent of the window spent. It recurs with every reset. A
-//! target is the Week window alone; the Session takes none, since the session
-//! is a ceiling on the rate of work and a Session spent out is a fault in the
-//! pace.
+//! target governs both week windows, Week and FableWeek, and its hours are
+//! bounded by the Week; the Session takes none, since the session is a ceiling
+//! on the rate of work and a Session spent out is a fault in the pace.
 
 use energy_nexus_core::{Configuring, Memory, Pacing, Remembering, Validating};
 use jiff::tz::TimeZone;
@@ -122,9 +122,10 @@ fn zero_hours_is_the_reset_itself() {
 }
 
 #[test]
-fn a_target_applies_to_the_week_window_alone() {
-    // 92 percent by 24 hours before the reset: the Week has the target; the
-    // five-hour Session and Claude's FableWeek, whatever the hours, have none.
+fn a_target_applies_to_both_week_windows_and_not_the_session() {
+    // 92 percent by 24 hours before the reset: the Week and Claude's
+    // FableWeek have the target; the five-hour Session, whatever the hours,
+    // has none.
     let memory = codex_target(spend_by(24, 92));
     let reset = 10 * WEEK;
     let paces = reading(
@@ -142,7 +143,46 @@ fn a_target_applies_to_the_week_window_alone() {
     assert_eq!(paces[1].name, Name::Week);
     assert_eq!(paces[1].target, spend_by(24, 92));
     assert_eq!(paces[2].name, Name::FableWeek);
-    assert_eq!(paces[2].target, Target::Even);
+    assert_eq!(paces[2].target, spend_by(24, 92));
+    // The two week windows, at the same usage and instant, are paced alike.
+    assert_eq!(paces[1].expected, paces[2].expected);
+    assert_eq!(paces[1].hours_left, paces[2].hours_left);
+    assert_eq!(paces[1].standing, paces[2].standing);
+}
+
+#[test]
+fn a_fable_week_is_paced_by_the_target_on_its_own_usage() {
+    // Week used 30, FableWeek used 60, three days in, 92 percent by 24 hours
+    // before the reset: the FableWeek stands Over its target on its own use,
+    // the Week Under, and both are paced by the same target and deadline.
+    let memory = codex_target(spend_by(24, 92));
+    let reset = 10 * WEEK;
+    let at = reset - WEEK + 72 * 3600;
+    let mut value = reading(&[(Name::Week, reset, 10080), (Name::FableWeek, reset, 10080)], 30, at);
+    value.window_vector[1].used = Used(Percent(60));
+    let paces = value.pace(memory.configuration(), &TimeZone::UTC);
+    assert_eq!(paces[0].standing, Standing::Under);
+    assert_eq!(paces[1].standing, Standing::Over);
+    assert_eq!(paces[1].target, spend_by(24, 92));
+    assert_eq!(paces[1].expected.0, Percent(46), "half of 92 percent");
+    assert_eq!(paces[1].hours_left.0, Hours(72));
+    // The Session alone is paced Even, whatever the hours.
+    let session = reading(&[(Name::Session, reset, 300)], 10, reset - 3600)
+        .pace(memory.configuration(), &TimeZone::UTC)
+        .remove(0);
+    assert_eq!(session.target, Target::Even);
+}
+
+#[test]
+fn a_fable_week_shorter_than_the_hours_is_paced_even() {
+    // The refusal is bound by the Week window; a FableWeek of fewer hours than
+    // the target (as a reading may hold) is paced Even, as any short window.
+    let memory = codex_target(spend_by(24, 92));
+    let reset = 10 * WEEK;
+    let pace = reading(&[(Name::FableWeek, reset, 600)], 10, reset - 3600)
+        .pace(memory.configuration(), &TimeZone::UTC)
+        .remove(0);
+    assert_eq!(pace.target, Target::Even);
 }
 
 #[test]
@@ -181,7 +221,8 @@ fn a_session_spent_out_is_a_fault_in_the_pace() {
     assert_eq!(standing(Name::Session, 100), Standing::Spent);
     assert_ne!(standing(Name::Session, 99), Standing::Spent);
     assert_eq!(standing(Name::Session, 0), Standing::Under);
-    // A Week used to 100 is a window run past its target, not a fault in the pace.
+    // A Week or FableWeek used to 100 is a window run past its target, not a
+    // fault in the pace.
     assert_eq!(standing(Name::Week, 100), Standing::Over);
     assert_eq!(standing(Name::FableWeek, 100), Standing::Over);
 }

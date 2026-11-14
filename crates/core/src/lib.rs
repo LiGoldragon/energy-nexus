@@ -493,8 +493,8 @@ pub mod version3 {
     }
 
     /// Where a target at an instant falls in the Week window of the latest
-    /// reading held for its provider: a target is the Week window alone. The
-    /// hours are the reset less the instant, rounded to the hour; the instant
+    /// reading held for its provider: the Week window bounds a target, which
+    /// governs the Week and FableWeek windows alike. The hours are the reset less the instant, rounded to the hour; the instant
     /// must fall within the window, hours from none to the window's duration.
     fn carry(latest: &[super::Latest], provider: &Provider, spend: &SpendBy) -> Carry {
         let Some(held) = latest.iter().find(|held| &held.provider == provider) else {
@@ -550,7 +550,7 @@ pub mod version3 {
     /// hours before the reset of the Week window the latest reading for its
     /// provider holds, else as `Even`; each is listed as not carried as it
     /// stood. A window target has no place in version 4, where a target is the
-    /// Week window alone: it is dropped and listed.
+    /// provider's, for its Week and FableWeek windows: it is dropped and listed.
     impl From<Memory> for super::Upgrade<super::Memory> {
         fn from(old: Memory) -> Self {
             let mut uncarried = Vec::new();
@@ -606,7 +606,7 @@ pub enum NotCarried {
     /// `Even`.
     Instant(InstantTarget),
     /// A window target, which version 4 has no place for: a target is the
-    /// Week window alone. It is dropped.
+    /// provider's, for its Week and FableWeek windows. It is dropped.
     WindowTarget(version3::WindowTarget),
 }
 impl std::fmt::Display for NotCarried {
@@ -617,7 +617,7 @@ impl std::fmt::Display for NotCarried {
             Self::WindowTarget(target) => {
                 write!(
                     formatter,
-                    "window target {:?} {:?} dropped: a target is the Week window alone; it was ",
+                    "window target {:?} {:?} dropped: a target is the provider's, for its Week and FableWeek windows; it was ",
                     target.provider, target.name
                 )?;
                 match &target.target {
@@ -690,17 +690,17 @@ impl Pacing for Reading {
         self.window_vector
             .iter()
             .map(|window| {
-                // A target is the Week window alone; every other window, the
-                // Session and Claude's FableWeek, is paced evenly.
+                // A provider's target paces both week windows, Week and
+                // FableWeek; the Session takes none and is paced evenly.
                 let target = match window.name {
-                    Name::Week => configuration
+                    Name::Week | Name::FableWeek => configuration
                         .targets
                         .0
                         .iter()
                         .find(|configured| configured.provider == self.provider)
                         .map(|configured| configured.target.clone())
                         .unwrap_or(Target::Even),
-                    Name::Session | Name::FableWeek => Target::Even,
+                    Name::Session => Target::Even,
                 };
                 let used = window.used.0.0.clamp(0, 100);
                 let start = window.resets.0.0 - window.duration.0.0 * 60;
@@ -896,7 +896,8 @@ impl Configuring for Memory {
             Set::Target(value) => {
                 value.target.validate().map_err(rule)?;
                 // A target of more hours than the Week window lasts: refused
-                // by the Week window the held reading names; with no reading
+                // by the Week window the held reading names (the bound stays
+                // the Week, though the target also paces FableWeek); with no reading
                 // held the target is accepted, and paced evenly in a window
                 // too short for it.
                 if let Target::SpendBy(spend) = &value.target {
@@ -1155,7 +1156,7 @@ mod tests {
         assert_eq!(value.next_reset(), None);
     }
     #[test]
-    fn a_target_applies_to_the_week_window_alone() {
+    fn a_target_applies_to_both_week_windows_and_not_the_session() {
         let mut value = reading(true, 40);
         for (name, used, duration) in [
             (Name::FableWeek, 60, 10080),
@@ -1178,7 +1179,7 @@ mod tests {
         assert_eq!(pace[0].name, Name::Week);
         assert_eq!(pace[0].target, spend_by(24));
         assert_eq!(pace[1].name, Name::FableWeek);
-        assert_eq!(pace[1].target, Target::Even);
+        assert_eq!(pace[1].target, spend_by(24));
         assert_eq!(pace[2].name, Name::Session);
         assert_eq!(pace[2].target, Target::Even);
     }

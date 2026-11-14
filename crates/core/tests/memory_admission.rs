@@ -181,7 +181,7 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
             "target Codex SpendBy.{ 1762450320 100 } stated an instant, which a target stated \
              against the window's reset has no place for; carried as Even: the Week window of \
              the latest reading does not hold that instant",
-            "window target Claude FableWeek dropped: a target is the Week window alone; it was \
+            "window target Claude FableWeek dropped: a target is the provider's, for its Week and FableWeek windows; it was \
              Even"
         ]
     );
@@ -707,10 +707,10 @@ fn format_version_three_carries_each_provider_instant_as_hours_before_the_week_r
             Carry::NoReading,
         ],
         "each stored provider target at an instant is listed, in the order stored; a provider \
-         target is the Week window's, so an instant is read against the Week alone"
+         target is the provider's, so an instant is read against the Week window"
     );
-    // Every stored window target is dropped, and listed: a target is the Week
-    // window alone.
+    // Every stored window target is dropped, and listed: a target is the
+    // provider's, for its Week and FableWeek windows.
     let dropped: Vec<_> = uncarried
         .iter()
         .filter(|held| matches!(held, NotCarried::WindowTarget(_)))
@@ -719,10 +719,10 @@ fn format_version_three_carries_each_provider_instant_as_hours_before_the_week_r
     assert_eq!(
         dropped,
         vec![
-            "window target Codex Session dropped: a target is the Week window alone; it was SpendBy.{ 1794620400 50 }",
-            "window target Codex FableWeek dropped: a target is the Week window alone; it was SpendBy.{ 1794968460 100 }",
-            "window target Codex Week dropped: a target is the Week window alone; it was SpendBy.{ 1797646860 100 }",
-            "window target Claude Week dropped: a target is the Week window alone; it was Even",
+            "window target Codex Session dropped: a target is the provider's, for its Week and FableWeek windows; it was SpendBy.{ 1794620400 50 }",
+            "window target Codex FableWeek dropped: a target is the provider's, for its Week and FableWeek windows; it was SpendBy.{ 1794968460 100 }",
+            "window target Codex Week dropped: a target is the provider's, for its Week and FableWeek windows; it was SpendBy.{ 1797646860 100 }",
+            "window target Claude Week dropped: a target is the provider's, for its Week and FableWeek windows; it was Even",
         ]
     );
     assert_eq!(
