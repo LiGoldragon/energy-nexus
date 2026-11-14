@@ -1,8 +1,8 @@
 mod schedule;
 
+use energy_nexus_core::operation::{Operation, Outcome as OperationOutcome, Reminding_Data};
 use energy_nexus_core::{
-    Configuring, LevelChange, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering,
-    Reminding,
+    Configuring, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering, Reminding,
 };
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
@@ -16,7 +16,7 @@ use energy_nexus_wire::{
     Upgrade,
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Call, Changed_Data, Provider, Input, Read_Data, Refused_Data, Output};
+use signal_energy_nexus::{Answerable, Call, Changed_Data, Output, Provider, Read_Data, Refused, Reset};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -24,19 +24,6 @@ struct Nexus {
     memory: Memory,
     subscribers: Vec<UnixStream>,
     place: Place,
-}
-enum Operation {
-    Reading(Provider),
-    Levelling(signal_energy_nexus::Reading),
-    Reminding(signal_energy_nexus::Reminder, signal_energy_nexus::Reading),
-    Redeeming(Provider),
-}
-enum OperationOutcome {
-    Read(signal_energy_nexus::Reading),
-    Levelled(LevelChange),
-    Reminded,
-    Redeemed(signal_energy_nexus::Reset),
-    Failed(Refused_Data),
 }
 trait Emitting {
     fn emit(&self, emission: Emission) -> Result<ExternalOutcome, String>;
@@ -77,7 +64,7 @@ impl Nexus {
                 };
                 match self.emit(emission) {
                     Ok(ExternalOutcome::Observed(reading)) => OperationOutcome::Read(reading),
-                    _ => OperationOutcome::Failed(Refused_Data::ProviderDown(provider)),
+                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                 }
             }
             Operation::Levelling(reading) => {
@@ -85,12 +72,12 @@ impl Nexus {
                 let change = candidate.remember(reading);
                 match self.commit(candidate) {
                     Ok(()) => OperationOutcome::Levelled(change),
-                    Err(refusal) => OperationOutcome::Failed(Refused_Data::RuleRefused(format!(
+                    Err(refusal) => OperationOutcome::Failed(Refused::RuleRefused(format!(
                         "memory not persisted: {refusal}"
                     ))),
                 }
             }
-            Operation::Reminding(reminder, reading) => {
+            Operation::Reminding(Reminding_Data { reminder, reading }) => {
                 let provider = reminder.provider.clone();
                 let level = reading.level(self.memory.configuration());
                 match self.emit(Emission::Send(Send {
@@ -99,7 +86,7 @@ impl Nexus {
                     level,
                 })) {
                     Ok(ExternalOutcome::Sent) => OperationOutcome::Reminded,
-                    _ => OperationOutcome::Failed(Refused_Data::ProviderDown(provider)),
+                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                 }
             }
             Operation::Redeeming(provider) => {
@@ -120,19 +107,21 @@ impl Nexus {
                             Ok(ExternalOutcome::Consumed(Consumed::AlreadyRedeemed)) => {
                                 OperationOutcome::Redeemed(reset)
                             }
-                            _ => OperationOutcome::Failed(Refused_Data::ProviderDown(provider)),
+                            _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                         }
                     }
-                    RedeemDecision::NoReset => OperationOutcome::Failed(Refused_Data::NoReset),
+                    RedeemDecision::NoReset => OperationOutcome::Failed(Refused::NoReset),
                     RedeemDecision::Refused(reason) => {
-                        OperationOutcome::Failed(Refused_Data::RuleRefused(reason))
+                        OperationOutcome::Failed(Refused::RuleRefused(reason))
                     }
                 }
             }
         }
     }
 }
-trait Answering {
+/// What the Nexus does to answer: the reads the schedule asks for and a
+/// redeem.
+trait Acting {
     /// Reads the provider now: levels the reading, pushes a level change and
     /// sends its reminders. Only the schedule asks for it.
     fn read(&mut self, provider: Provider) -> Output;
@@ -140,14 +129,14 @@ trait Answering {
     fn recall(&self, provider: Provider) -> Output;
     fn redeem(&mut self, provider: Provider) -> Output;
 }
-impl Answering for Nexus {
+impl Acting for Nexus {
     fn recall(&self, provider: Provider) -> Output {
         match self.memory.latest(&provider) {
             Some(latest) => Output::Read(Read_Data {
                 pace_vector: latest.reading.pace(self.memory.configuration()),
                 reading: latest.reading.clone(),
             }),
-            None => Output::Refused(Refused_Data::ProviderDown(provider)),
+            None => Output::Refused(Refused::ProviderDown(provider)),
         }
     }
     fn read(&mut self, provider: Provider) -> Output {
@@ -157,10 +146,10 @@ impl Answering for Nexus {
                 let OperationOutcome::Levelled(change) = levelled else {
                     return match levelled {
                         OperationOutcome::Failed(refused) => Output::Refused(refused),
-                        _ => Output::Refused(Refused_Data::ProviderDown(provider)),
+                        _ => Output::Refused(Refused::ProviderDown(provider)),
                     };
                 };
-                if change.old.as_ref() != Some(&change.latest.level) {
+                if change.old.0.as_ref() != Some(&change.latest.level) {
                     let changed = Output::Changed(Changed_Data {
                         provider: provider.clone(),
                         level: change.latest.level.clone(),
@@ -168,7 +157,10 @@ impl Answering for Nexus {
                     });
                     push(&mut self.subscribers, &changed);
                     for reminder in self.memory.reminders_for(&provider, &change.latest.level) {
-                        let _ = self.attempt(Operation::Reminding(reminder, reading.clone()));
+                        let _ = self.attempt(Operation::Reminding(Reminding_Data {
+                            reminder,
+                            reading: reading.clone(),
+                        }));
                     }
                 }
                 let pace_vector = reading.pace(self.memory.configuration());
@@ -178,14 +170,14 @@ impl Answering for Nexus {
                 })
             }
             OperationOutcome::Failed(refused) => Output::Refused(refused),
-            _ => Output::Refused(Refused_Data::ProviderDown(provider)),
+            _ => Output::Refused(Refused::ProviderDown(provider)),
         }
     }
     fn redeem(&mut self, provider: Provider) -> Output {
         match self.attempt(Operation::Redeeming(provider)) {
             OperationOutcome::Redeemed(reset) => Output::Redeemed(reset),
             OperationOutcome::Failed(refused) => Output::Refused(refused),
-            _ => Output::Refused(Refused_Data::NoReset),
+            _ => Output::Refused(Refused::NoReset),
         }
     }
 }
@@ -196,20 +188,20 @@ struct Daemon(Arc<Mutex<Nexus>>);
 impl Reads for Daemon {
     async fn read(&self, provider: Provider) -> Output {
         let nexus = Arc::clone(&self.0);
-        let down = Output::Refused(Refused_Data::ProviderDown(provider.clone()));
+        let down = Output::Refused(Refused::ProviderDown(provider.clone()));
         tokio::task::spawn_blocking(move || match nexus.lock() {
             Ok(mut nexus) => nexus.read(provider),
-            Err(_) => Output::Refused(Refused_Data::ProviderDown(provider)),
+            Err(_) => Output::Refused(Refused::ProviderDown(provider)),
         })
         .await
         .unwrap_or(down)
     }
     async fn recall(&self, provider: Provider) -> Output {
         let nexus = Arc::clone(&self.0);
-        let down = Output::Refused(Refused_Data::ProviderDown(provider.clone()));
+        let down = Output::Refused(Refused::ProviderDown(provider.clone()));
         tokio::task::spawn_blocking(move || match nexus.lock() {
             Ok(nexus) => nexus.recall(provider),
-            Err(_) => Output::Refused(Refused_Data::ProviderDown(provider)),
+            Err(_) => Output::Refused(Refused::ProviderDown(provider)),
         })
         .await
         .unwrap_or(down)
@@ -345,6 +337,36 @@ impl Serving for Place {
         Ok(())
     }
 }
+/// One public call, answered through the contract's generated dispatch: a
+/// question is the schedule's, a redeem the Nexus's.
+struct Public<'a> {
+    nexus: &'a Arc<Mutex<Nexus>>,
+    events: &'a tokio::sync::mpsc::UnboundedSender<Event>,
+}
+impl signal_energy_nexus::Answering for Public<'_> {
+    /// The question: answered by the schedule, which reads first when the
+    /// latest reading is older than the last turn end on the provider.
+    fn read(&self, provider: &Provider) -> Result<Read_Data, Output> {
+        match schedule::ask(self.events, provider.clone()) {
+            Output::Read(read) => Ok(read),
+            other => Err(other),
+        }
+    }
+    /// The subscriber is kept once its answer is written.
+    fn subscribe(&self) -> Result<(), Output> {
+        Ok(())
+    }
+    fn redeem(&self, provider: &Provider) -> Result<Reset, Output> {
+        let mut nexus = self
+            .nexus
+            .lock()
+            .map_err(|_| Output::Refused(Refused::ProviderDown(provider.clone())))?;
+        match nexus.redeem(provider.clone()) {
+            Output::Redeemed(reset) => Ok(reset),
+            other => Err(other),
+        }
+    }
+}
 fn serve_public(
     mut stream: UnixStream,
     nexus: Arc<Mutex<Nexus>>,
@@ -356,20 +378,15 @@ fn serve_public(
     let Ok(call) = Signal::<Call>::from(bytes).restore() else {
         return;
     };
-    let subscribe = matches!(call.input, Input::Subscribe);
-    let response = match call.input {
-        // The question: answered by the schedule, which reads first when the
-        // latest reading is older than the last turn end on the provider.
-        Input::Read(provider) => Some(schedule::ask(&events, provider)),
-        Input::Subscribe => Some(Output::Subscribed),
-        Input::Redeem(provider) => nexus.lock().ok().map(|mut n| n.redeem(provider)),
-    };
-    if let Some(response) = response {
-        if let Ok(signal) = response.signalize() {
-            if stream.write_frame(signal.bytes()).is_ok() && subscribe {
-                if let Ok(mut n) = nexus.lock() {
-                    n.subscribers.push(stream)
-                }
+    let response = call.input.answer(&Public {
+        nexus: &nexus,
+        events: &events,
+    });
+    let subscribed = matches!(response, Output::Subscribed);
+    if let Ok(signal) = response.signalize() {
+        if stream.write_frame(signal.bytes()).is_ok() && subscribed {
+            if let Ok(mut n) = nexus.lock() {
+                n.subscribers.push(stream)
             }
         }
     }
@@ -484,7 +501,7 @@ mod tests {
         std::fs::create_dir(root.join("energy.new")).unwrap();
         let outcome = nexus.attempt(Operation::Levelling(reading(95)));
         assert!(
-            matches!(&outcome, OperationOutcome::Failed(Refused_Data::RuleRefused(reason)) if reason.starts_with("memory not persisted")),
+            matches!(&outcome, OperationOutcome::Failed(Refused::RuleRefused(reason)) if reason.starts_with("memory not persisted")),
         );
         assert_eq!(used(&nexus.memory), Percent(10), "the memory in use is the committed one");
         assert_eq!(std::fs::read(root.join("energy.rkyv")).unwrap(), committed);

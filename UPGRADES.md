@@ -6,7 +6,9 @@ No Energy wire or memory change. Repins signal-energy-nexus to `e0eb9b7` and met
 
 **Names.** `Query`, `Response` and `Refused` of the ordinary contract are `Input`, `Output` and `Refused_Data`; the meta `Query`, `Response` and `ProgramPath` are `Input`, `Output` and `Program_Data`. A field holds the newtype its Ethos names: `Window.used: Used`, `resets: Resets`, `duration: Duration`; `Reset.expires: Expires`; `Reading.allowed: Allowed`, `at: At`; `Threshold.left: Left`; `Pace.expected: Expected`, `used: Used`, `per_day: PerDay`; `Caller.process_id: ProcessId`, `user_id: UserId`. Each archives and reads as its content, so `energy.rkyv` and every frame are as before: the contracts prove it type by type (`tests/hand_and_generated.rs` in each), and `memory_admission` still reads the e5722529 archive.
 
-**Still hand-written here** (later steps): the Memory records of `crates/core` (`Memory`, `Latest`, `Configuration`, the frozen upgrade layouts), the daemon's `Operation` and `OperationOutcome`, the emission contract of `crates/emission`, and the translator's `Programs`. `ethos/library.ethos` is now signal-energy-nexus's `ethos/library.ethos`, which generates the library; this copy is only read by a test.
+**Operation generated.** `ethos/operation.ethos` follows the running code (`Levelled.LevelChange`, `Failed.Refused` imported from the contract) and generates `crates/core/src/generated/operation.rs`, checked by the core's `build.rs`; the daemon's hand `Operation` and `OperationOutcome` are gone. `LevelChange.old` is the newtype `Old`. The public socket is answered through the contract's generated `Answerable` dispatch. The stale `ethos/library.ethos` is removed: the Library is signal-energy-nexus's.
+
+**Still hand-written here** (later steps): the Memory records of `crates/core`, the emission contract of `crates/emission`, and the translator's `Programs`.
 
 ## 0.3.3 — signal-flow 63: Input and Output
 

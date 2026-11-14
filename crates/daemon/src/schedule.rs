@@ -17,7 +17,7 @@
 //! When nothing happens, nothing is read.
 use energy_nexus_core::Resetting;
 use energy_nexus_emission::TurnEnd;
-use signal_energy_nexus::{Provider, Reading, Refused_Data, Output};
+use signal_energy_nexus::{Provider, Reading, Refused, Output};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -41,7 +41,7 @@ pub enum Event {
 
 /// The reads the schedule asks for, and the answers from memory.
 pub trait Reads: Clone + Send + Sync + 'static {
-    /// One read of the provider: `Read` with the reading, or `Refused_Data`.
+    /// One read of the provider: `Read` with the reading, or `Refused`.
     fn read(&self, provider: Provider) -> impl Future<Output = Output> + Send;
     /// The latest reading in memory, answered as a `Read`.
     fn recall(&self, provider: Provider) -> impl Future<Output = Output> + Send;
@@ -299,11 +299,11 @@ pub fn ask(events: &mpsc::UnboundedSender<Event>, provider: Provider) -> Output 
         .send(Event::Question(provider.clone(), answer))
         .is_err()
     {
-        return Output::Refused(Refused_Data::ProviderDown(provider));
+        return Output::Refused(Refused::ProviderDown(provider));
     }
     answered
         .blocking_recv()
-        .unwrap_or(Output::Refused(Refused_Data::ProviderDown(provider)))
+        .unwrap_or(Output::Refused(Refused::ProviderDown(provider)))
 }
 
 #[cfg(test)]
@@ -468,7 +468,7 @@ mod tests {
                 gate.acquire().await.unwrap().forget();
             }
             if *self.down.lock().unwrap() {
-                return Output::Refused(Refused_Data::ProviderDown(provider));
+                return Output::Refused(Refused::ProviderDown(provider));
             }
             let at = self.now();
             let resets = if self.next_reset > 0 { at + self.next_reset } else { 0 };
@@ -486,7 +486,7 @@ mod tests {
                     reading: reading.clone(),
                     pace_vector: Vec::new(),
                 }),
-                None => Output::Refused(Refused_Data::ProviderDown(provider)),
+                None => Output::Refused(Refused::ProviderDown(provider)),
             }
         }
     }
