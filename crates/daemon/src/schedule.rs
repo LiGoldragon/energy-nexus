@@ -17,7 +17,7 @@
 //! When nothing happens, nothing is read.
 use energy_nexus_core::Resetting;
 use energy_nexus_emission::TurnEnd;
-use signal_energy_nexus::{Provider, Reading, Refused, Response};
+use signal_energy_nexus::{Provider, Reading, Refused_Data, Output};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -31,9 +31,9 @@ pub enum Event {
     /// A turn ended.
     TurnEnded(TurnEnd),
     /// A question about a provider, answered on the sender.
-    Question(Provider, oneshot::Sender<Response>),
+    Question(Provider, oneshot::Sender<Output>),
     /// A read the schedule started has ended.
-    Finished(Provider, Response),
+    Finished(Provider, Output),
     /// The provider's alarm fired: its window reset, if the alarm is still
     /// the one set (a newer reading may have moved it).
     WindowReset(Provider),
@@ -41,10 +41,10 @@ pub enum Event {
 
 /// The reads the schedule asks for, and the answers from memory.
 pub trait Reads: Clone + Send + Sync + 'static {
-    /// One read of the provider: `Read` with the reading, or `Refused`.
-    fn read(&self, provider: Provider) -> impl Future<Output = Response> + Send;
+    /// One read of the provider: `Read` with the reading, or `Refused_Data`.
+    fn read(&self, provider: Provider) -> impl Future<Output = Output> + Send;
     /// The latest reading in memory, answered as a `Read`.
-    fn recall(&self, provider: Provider) -> impl Future<Output = Response> + Send;
+    fn recall(&self, provider: Provider) -> impl Future<Output = Output> + Send;
 }
 
 /// Wall time in Unix seconds, which readings and turn ends are stamped in,
@@ -137,7 +137,7 @@ struct Track {
     /// A read is owed once the one in flight ends.
     again: bool,
     /// Questions waiting on the read in flight.
-    waiting: Vec<oneshot::Sender<Response>>,
+    waiting: Vec<oneshot::Sender<Output>>,
     /// The moment the next window resets, from the latest reading: the
     /// instant the provider's alarm is set at.
     resets_at: Option<i64>,
@@ -204,7 +204,7 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
     fn reading(&mut self, reading: &Reading) {
         let resets = reading.next_reset().map(|instant| instant.0);
         let track = self.track(&reading.provider);
-        track.read_at = Some(reading.at.0);
+        track.read_at = Some(reading.at.0.0);
         self.resets(&reading.provider, resets);
     }
     fn resets(&mut self, provider: &Provider, at: Option<i64>) {
@@ -245,7 +245,7 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
             }
             Event::Finished(provider, response) => {
                 self.track(&provider).in_flight = false;
-                if let Response::Read(read) = &response {
+                if let Output::Read(read) = &response {
                     self.reading(&read.reading);
                 }
                 let track = self.track(&provider);
@@ -293,17 +293,17 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
 
 /// A question asked from a thread outside the schedule: the answer, once
 /// the schedule gives it.
-pub fn ask(events: &mpsc::UnboundedSender<Event>, provider: Provider) -> Response {
+pub fn ask(events: &mpsc::UnboundedSender<Event>, provider: Provider) -> Output {
     let (answer, answered) = oneshot::channel();
     if events
         .send(Event::Question(provider.clone(), answer))
         .is_err()
     {
-        return Response::Refused(Refused::ProviderDown(provider));
+        return Output::Refused(Refused_Data::ProviderDown(provider));
     }
     answered
         .blocking_recv()
-        .unwrap_or(Response::Refused(Refused::ProviderDown(provider)))
+        .unwrap_or(Output::Refused(Refused_Data::ProviderDown(provider)))
 }
 
 #[cfg(test)]
@@ -403,15 +403,15 @@ mod tests {
     fn reading(provider: Provider, at: i64, resets: i64) -> Reading {
         Reading {
             provider,
-            allowed: true,
+            allowed: signal_energy_nexus::Allowed(true),
             window_vector: vec![Window {
                 name: Name::Session,
-                used: Percent(10),
-                resets: Instant(resets),
-                duration: Minutes(300),
+                used: signal_energy_nexus::Used(Percent(10)),
+                resets: signal_energy_nexus::Resets(Instant(resets)),
+                duration: signal_energy_nexus::Duration(Minutes(300)),
             }],
             reset_vector: Vec::new(),
-            at: Instant(at),
+            at: signal_energy_nexus::At(Instant(at)),
         }
     }
 
@@ -462,31 +462,31 @@ mod tests {
         }
     }
     impl Reads for Provided {
-        async fn read(&self, provider: Provider) -> Response {
+        async fn read(&self, provider: Provider) -> Output {
             self.reads.lock().unwrap().push((provider.clone(), self.now()));
             if let Some(gate) = &self.gate {
                 gate.acquire().await.unwrap().forget();
             }
             if *self.down.lock().unwrap() {
-                return Response::Refused(Refused::ProviderDown(provider));
+                return Output::Refused(Refused_Data::ProviderDown(provider));
             }
             let at = self.now();
             let resets = if self.next_reset > 0 { at + self.next_reset } else { 0 };
             let reading = reading(provider, at, resets);
             self.remember(reading.clone());
-            Response::Read(Read_Data {
+            Output::Read(Read_Data {
                 reading,
                 pace_vector: Vec::new(),
             })
         }
-        async fn recall(&self, provider: Provider) -> Response {
+        async fn recall(&self, provider: Provider) -> Output {
             let latest = self.latest.lock().unwrap();
             match latest.iter().find(|known| known.provider == provider) {
-                Some(reading) => Response::Read(Read_Data {
+                Some(reading) => Output::Read(Read_Data {
                     reading: reading.clone(),
                     pace_vector: Vec::new(),
                 }),
-                None => Response::Refused(Refused::ProviderDown(provider)),
+                None => Output::Refused(Refused_Data::ProviderDown(provider)),
             }
         }
     }
@@ -616,7 +616,7 @@ mod tests {
         );
     }
 
-    async fn asked(events: &mpsc::UnboundedSender<Event>, provider: Provider) -> Response {
+    async fn asked(events: &mpsc::UnboundedSender<Event>, provider: Provider) -> Output {
         let (answer, answered) = oneshot::channel();
         events.send(Event::Question(provider, answer)).unwrap();
         answered.await.unwrap()
@@ -637,7 +637,7 @@ mod tests {
             .unwrap();
         let answer = asked(&events, Provider::Codex).await;
         assert!(provided.reads().is_empty(), "a fresh reading is not read again");
-        assert!(matches!(answer, Response::Read(read) if read.reading == older));
+        assert!(matches!(answer, Output::Read(read) if read.reading == older));
         // A turn end whose read fails leaves the memory older than it: the
         // next question reads.
         *provided.down.lock().unwrap() = true;
@@ -649,7 +649,7 @@ mod tests {
         let answer = asked(&events, Provider::Codex).await;
         assert_eq!(provided.count(&Provider::Codex), 2, "a stale reading is read first");
         assert!(
-            matches!(&answer, Response::Read(read) if read.reading.at.0 > START),
+            matches!(&answer, Output::Read(read) if read.reading.at.0.0 > START),
             "answered with the new reading: {answer:?}"
         );
         // Now fresh again: answered from memory.
@@ -674,8 +674,8 @@ mod tests {
         settle().await;
         assert_eq!(provided.count(&Provider::Claude), 1, "the second waits on the read in flight");
         provided.release();
-        assert!(matches!(first.await.unwrap(), Response::Read(_)));
-        assert!(matches!(second.await.unwrap(), Response::Read(_)));
+        assert!(matches!(first.await.unwrap(), Output::Read(_)));
+        assert!(matches!(second.await.unwrap(), Output::Read(_)));
         assert_eq!(provided.count(&Provider::Claude), 1);
     }
 

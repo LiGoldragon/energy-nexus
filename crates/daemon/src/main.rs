@@ -16,7 +16,7 @@ use energy_nexus_wire::{
     Upgrade,
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Call, Changed_Data, Provider, Query, Read_Data, Refused, Response};
+use signal_energy_nexus::{Call, Changed_Data, Provider, Input, Read_Data, Refused_Data, Output};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -36,7 +36,7 @@ enum OperationOutcome {
     Levelled(LevelChange),
     Reminded,
     Redeemed(signal_energy_nexus::Reset),
-    Failed(Refused),
+    Failed(Refused_Data),
 }
 trait Emitting {
     fn emit(&self, emission: Emission) -> Result<ExternalOutcome, String>;
@@ -77,7 +77,7 @@ impl Nexus {
                 };
                 match self.emit(emission) {
                     Ok(ExternalOutcome::Observed(reading)) => OperationOutcome::Read(reading),
-                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                    _ => OperationOutcome::Failed(Refused_Data::ProviderDown(provider)),
                 }
             }
             Operation::Levelling(reading) => {
@@ -85,7 +85,7 @@ impl Nexus {
                 let change = candidate.remember(reading);
                 match self.commit(candidate) {
                     Ok(()) => OperationOutcome::Levelled(change),
-                    Err(refusal) => OperationOutcome::Failed(Refused::RuleRefused(format!(
+                    Err(refusal) => OperationOutcome::Failed(Refused_Data::RuleRefused(format!(
                         "memory not persisted: {refusal}"
                     ))),
                 }
@@ -99,7 +99,7 @@ impl Nexus {
                     level,
                 })) {
                     Ok(ExternalOutcome::Sent) => OperationOutcome::Reminded,
-                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                    _ => OperationOutcome::Failed(Refused_Data::ProviderDown(provider)),
                 }
             }
             Operation::Redeeming(provider) => {
@@ -120,12 +120,12 @@ impl Nexus {
                             Ok(ExternalOutcome::Consumed(Consumed::AlreadyRedeemed)) => {
                                 OperationOutcome::Redeemed(reset)
                             }
-                            _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                            _ => OperationOutcome::Failed(Refused_Data::ProviderDown(provider)),
                         }
                     }
-                    RedeemDecision::NoReset => OperationOutcome::Failed(Refused::NoReset),
+                    RedeemDecision::NoReset => OperationOutcome::Failed(Refused_Data::NoReset),
                     RedeemDecision::Refused(reason) => {
-                        OperationOutcome::Failed(Refused::RuleRefused(reason))
+                        OperationOutcome::Failed(Refused_Data::RuleRefused(reason))
                     }
                 }
             }
@@ -135,33 +135,33 @@ impl Nexus {
 trait Answering {
     /// Reads the provider now: levels the reading, pushes a level change and
     /// sends its reminders. Only the schedule asks for it.
-    fn read(&mut self, provider: Provider) -> Response;
+    fn read(&mut self, provider: Provider) -> Output;
     /// The latest reading in memory, with its pace.
-    fn recall(&self, provider: Provider) -> Response;
-    fn redeem(&mut self, provider: Provider) -> Response;
+    fn recall(&self, provider: Provider) -> Output;
+    fn redeem(&mut self, provider: Provider) -> Output;
 }
 impl Answering for Nexus {
-    fn recall(&self, provider: Provider) -> Response {
+    fn recall(&self, provider: Provider) -> Output {
         match self.memory.latest(&provider) {
-            Some(latest) => Response::Read(Read_Data {
+            Some(latest) => Output::Read(Read_Data {
                 pace_vector: latest.reading.pace(self.memory.configuration()),
                 reading: latest.reading.clone(),
             }),
-            None => Response::Refused(Refused::ProviderDown(provider)),
+            None => Output::Refused(Refused_Data::ProviderDown(provider)),
         }
     }
-    fn read(&mut self, provider: Provider) -> Response {
+    fn read(&mut self, provider: Provider) -> Output {
         match self.attempt(Operation::Reading(provider.clone())) {
             OperationOutcome::Read(reading) => {
                 let levelled = self.attempt(Operation::Levelling(reading.clone()));
                 let OperationOutcome::Levelled(change) = levelled else {
                     return match levelled {
-                        OperationOutcome::Failed(refused) => Response::Refused(refused),
-                        _ => Response::Refused(Refused::ProviderDown(provider)),
+                        OperationOutcome::Failed(refused) => Output::Refused(refused),
+                        _ => Output::Refused(Refused_Data::ProviderDown(provider)),
                     };
                 };
                 if change.old.as_ref() != Some(&change.latest.level) {
-                    let changed = Response::Changed(Changed_Data {
+                    let changed = Output::Changed(Changed_Data {
                         provider: provider.clone(),
                         level: change.latest.level.clone(),
                         reading: reading.clone(),
@@ -172,20 +172,20 @@ impl Answering for Nexus {
                     }
                 }
                 let pace_vector = reading.pace(self.memory.configuration());
-                Response::Read(Read_Data {
+                Output::Read(Read_Data {
                     reading,
                     pace_vector,
                 })
             }
-            OperationOutcome::Failed(refused) => Response::Refused(refused),
-            _ => Response::Refused(Refused::ProviderDown(provider)),
+            OperationOutcome::Failed(refused) => Output::Refused(refused),
+            _ => Output::Refused(Refused_Data::ProviderDown(provider)),
         }
     }
-    fn redeem(&mut self, provider: Provider) -> Response {
+    fn redeem(&mut self, provider: Provider) -> Output {
         match self.attempt(Operation::Redeeming(provider)) {
-            OperationOutcome::Redeemed(reset) => Response::Redeemed(reset),
-            OperationOutcome::Failed(refused) => Response::Refused(refused),
-            _ => Response::Refused(Refused::NoReset),
+            OperationOutcome::Redeemed(reset) => Output::Redeemed(reset),
+            OperationOutcome::Failed(refused) => Output::Refused(refused),
+            _ => Output::Refused(Refused_Data::NoReset),
         }
     }
 }
@@ -194,22 +194,22 @@ impl Answering for Nexus {
 #[derive(Clone)]
 struct Daemon(Arc<Mutex<Nexus>>);
 impl Reads for Daemon {
-    async fn read(&self, provider: Provider) -> Response {
+    async fn read(&self, provider: Provider) -> Output {
         let nexus = Arc::clone(&self.0);
-        let down = Response::Refused(Refused::ProviderDown(provider.clone()));
+        let down = Output::Refused(Refused_Data::ProviderDown(provider.clone()));
         tokio::task::spawn_blocking(move || match nexus.lock() {
             Ok(mut nexus) => nexus.read(provider),
-            Err(_) => Response::Refused(Refused::ProviderDown(provider)),
+            Err(_) => Output::Refused(Refused_Data::ProviderDown(provider)),
         })
         .await
         .unwrap_or(down)
     }
-    async fn recall(&self, provider: Provider) -> Response {
+    async fn recall(&self, provider: Provider) -> Output {
         let nexus = Arc::clone(&self.0);
-        let down = Response::Refused(Refused::ProviderDown(provider.clone()));
+        let down = Output::Refused(Refused_Data::ProviderDown(provider.clone()));
         tokio::task::spawn_blocking(move || match nexus.lock() {
             Ok(nexus) => nexus.recall(provider),
-            Err(_) => Response::Refused(Refused::ProviderDown(provider)),
+            Err(_) => Output::Refused(Refused_Data::ProviderDown(provider)),
         })
         .await
         .unwrap_or(down)
@@ -265,7 +265,7 @@ fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) 
         }
     }
 }
-fn push(subscribers: &mut Vec<UnixStream>, response: &Response) {
+fn push(subscribers: &mut Vec<UnixStream>, response: &Output) {
     let Ok(signal) = response.signalize() else {
         return;
     };
@@ -356,13 +356,13 @@ fn serve_public(
     let Ok(call) = Signal::<Call>::from(bytes).restore() else {
         return;
     };
-    let subscribe = matches!(call.input, Query::Subscribe);
+    let subscribe = matches!(call.input, Input::Subscribe);
     let response = match call.input {
         // The question: answered by the schedule, which reads first when the
         // latest reading is older than the last turn end on the provider.
-        Query::Read(provider) => Some(schedule::ask(&events, provider)),
-        Query::Subscribe => Some(Response::Subscribed),
-        Query::Redeem(provider) => nexus.lock().ok().map(|mut n| n.redeem(provider)),
+        Input::Read(provider) => Some(schedule::ask(&events, provider)),
+        Input::Subscribe => Some(Output::Subscribed),
+        Input::Redeem(provider) => nexus.lock().ok().map(|mut n| n.redeem(provider)),
     };
     if let Some(response) = response {
         if let Ok(signal) = response.signalize() {
@@ -381,21 +381,21 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
     let Ok(call) = Signal::<meta_signal_energy_nexus::Call>::from(bytes).restore() else {
         return;
     };
-    let meta_signal_energy_nexus::Query::Configure(set) = call.input;
+    let meta_signal_energy_nexus::Input::Configure(set) = call.input;
     let response = match nexus.lock() {
         Ok(mut n) => {
             let mut candidate = n.memory.clone();
             match candidate.configure(set) {
                 Ok(applied) => match n.commit(candidate) {
-                    Ok(()) => meta_signal_energy_nexus::Response::Configured(applied),
-                    Err(refusal) => meta_signal_energy_nexus::Response::ConfigureRefused(format!(
+                    Ok(()) => meta_signal_energy_nexus::Output::Configured(applied),
+                    Err(refusal) => meta_signal_energy_nexus::Output::ConfigureRefused(format!(
                         "memory not persisted: {refusal}"
                     )),
                 },
-                Err(reason) => meta_signal_energy_nexus::Response::ConfigureRefused(reason),
+                Err(reason) => meta_signal_energy_nexus::Output::ConfigureRefused(reason),
             }
         }
-        Err(_) => meta_signal_energy_nexus::Response::ConfigureRefused("memory unavailable".into()),
+        Err(_) => meta_signal_energy_nexus::Output::ConfigureRefused("memory unavailable".into()),
     };
     if let Ok(signal) = response.signalize() {
         let _ = stream.write_frame(signal.bytes());
@@ -444,21 +444,22 @@ mod tests {
     fn reading(used: i64) -> Reading {
         Reading {
             provider: Provider::Codex,
-            allowed: true,
+            allowed: signal_energy_nexus::Allowed(true),
             window_vector: vec![Window {
                 name: Name::Week,
-                used: Percent(used),
-                resets: Instant(1_000),
-                duration: Minutes(10_080),
+                used: signal_energy_nexus::Used(Percent(used)),
+                resets: signal_energy_nexus::Resets(Instant(1_000)),
+                duration: signal_energy_nexus::Duration(Minutes(10_080)),
             }],
             reset_vector: Vec::new(),
-            at: Instant(1),
+            at: signal_energy_nexus::At(Instant(1)),
         }
     }
 
     fn used(memory: &Memory) -> Percent {
         memory.latest(&Provider::Codex).unwrap().reading.window_vector[0]
             .used
+            .0
             .clone()
     }
 
@@ -483,7 +484,7 @@ mod tests {
         std::fs::create_dir(root.join("energy.new")).unwrap();
         let outcome = nexus.attempt(Operation::Levelling(reading(95)));
         assert!(
-            matches!(&outcome, OperationOutcome::Failed(Refused::RuleRefused(reason)) if reason.starts_with("memory not persisted")),
+            matches!(&outcome, OperationOutcome::Failed(Refused_Data::RuleRefused(reason)) if reason.starts_with("memory not persisted")),
         );
         assert_eq!(used(&nexus.memory), Percent(10), "the memory in use is the committed one");
         assert_eq!(std::fs::read(root.join("energy.rkyv")).unwrap(), committed);

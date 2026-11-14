@@ -9,7 +9,7 @@ use energy_nexus_wire::{Framing, Place, PlaceName, SocketPathing};
 use nix::sys::signal::{kill, Signal as Kill};
 use nix::unistd::Pid;
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Call, Caller, Provider, Query, Response};
+use signal_energy_nexus::{Call, Caller, Provider, Input, Output};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::process::{Command, Stdio};
@@ -79,11 +79,11 @@ printf '{{"jsonrpc":"2.0","id":2,"result":{{"rateLimits":{{"primary":{{"usedPerc
     program
 }
 
-fn call(input: Query) -> Vec<u8> {
+fn call(input: Input) -> Vec<u8> {
     Call {
         caller: Caller {
-            process_id: std::process::id() as i64,
-            user_id: 0,
+            process_id: signal_energy_nexus::ProcessId(std::process::id() as i64),
+            user_id: signal_energy_nexus::UserId(0),
         },
         input,
     }
@@ -93,8 +93,8 @@ fn call(input: Query) -> Vec<u8> {
     .to_vec()
 }
 
-fn response(stream: &mut UnixStream) -> Response {
-    Signal::<Response>::from(stream.read_frame().unwrap())
+fn response(stream: &mut UnixStream) -> Output {
+    Signal::<Output>::from(stream.read_frame().unwrap())
         .restore()
         .unwrap()
 }
@@ -188,13 +188,13 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
     // Watch the daemon's level changes, then let Flow open.
     let mut changes = UnixStream::connect(place.public()).unwrap();
     changes.set_read_timeout(Some(EVENT_WAIT)).unwrap();
-    changes.write_frame(&call(Query::Subscribe)).unwrap();
-    assert_eq!(response(&mut changes), Response::Subscribed);
+    changes.write_frame(&call(Input::Subscribe)).unwrap();
+    assert_eq!(response(&mut changes), Output::Subscribed);
     open.send(()).unwrap();
     match response(&mut changes) {
-        Response::Changed(changed) => {
+        Output::Changed(changed) => {
             assert_eq!(changed.provider, Provider::Codex);
-            assert!(changed.reading.at.0 > turn_ended_at);
+            assert!(changed.reading.at.0.0 > turn_ended_at);
         }
         other => panic!("the first reading pushes its level, got {other:?}"),
     }
@@ -204,8 +204,8 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
     // memory, with no second read.
     let mut question = UnixStream::connect(place.public()).unwrap();
     question.set_read_timeout(Some(EVENT_WAIT)).unwrap();
-    question.write_frame(&call(Query::Read(Provider::Codex))).unwrap();
-    assert!(matches!(response(&mut question), Response::Read(_)));
+    question.write_frame(&call(Input::Read(Provider::Codex))).unwrap();
+    assert!(matches!(response(&mut question), Output::Read(_)));
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "read\n");
 
     let (exited, exit) = mpsc::channel();

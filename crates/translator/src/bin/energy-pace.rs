@@ -2,7 +2,7 @@ use datom_codec::{Actualizing, Potential};
 use energy_nexus_translator::cli::ConfiguredPlace;
 use energy_nexus_translator::{TextClienting, Translator};
 use energy_nexus_wire::Place;
-use signal_energy_nexus::{Provider, Response, Target};
+use signal_energy_nexus::{Provider, Output, Target};
 
 fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
     let text = match provider {
@@ -20,12 +20,12 @@ fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::
         depth: 0,
         maximum_depth: 128,
     };
-    let mut potential = Potential::<Response>::from(answer.as_str());
+    let mut potential = Potential::<Output>::from(answer.as_str());
     match potential
         .actualize(&mut budget)
         .map_err(|error| format!("{error:?}"))?
     {
-        Response::Read(read) => Ok(read),
+        Output::Read(read) => Ok(read),
         other => Err(format!("read refused: {other:?}")),
     }
 }
@@ -38,7 +38,7 @@ fn show(read: signal_energy_nexus::Read_Data) {
             .iter()
             .find(|window| window.name == pace.name);
         let period = window
-            .map(|window| format!("{} days", window.duration.0 as f64 / 1_440.0))
+            .map(|window| format!("{} days", window.duration.0.0 as f64 / 1_440.0))
             .unwrap_or_else(|| "the current period".into());
         let target = match pace.target {
             Target::Even => "evenly".into(),
@@ -48,12 +48,12 @@ fn show(read: signal_energy_nexus::Read_Data) {
             "{:?} {:?}: {}% used over {}; target {} expects {}% now; {:?}, with {}% per day from here.",
             pace.provider,
             pace.name,
-            pace.used.0,
+            pace.used.0.0,
             period,
             target,
-            pace.expected.0,
+            pace.expected.0.0,
             pace.standing,
-            pace.per_day.0
+            pace.per_day.0.0
         );
     }
 }

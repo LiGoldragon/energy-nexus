@@ -11,7 +11,7 @@ use energy_nexus_wire::{Framing, Place, PlaceName, PlacedSocket, PlacesSocket, S
 use nix::sys::signal::{kill, Signal as Kill};
 use nix::unistd::Pid;
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Call, Caller, Percent, Provider, Query, Response};
+use signal_energy_nexus::{Call, Caller, Percent, Provider, Input, Output};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
@@ -82,11 +82,11 @@ printf '{{"jsonrpc":"2.0","id":2,"result":{{"rateLimits":{{"primary":{{"usedPerc
     program
 }
 
-fn call(input: Query) -> Vec<u8> {
+fn call(input: Input) -> Vec<u8> {
     Call {
         caller: Caller {
-            process_id: std::process::id() as i64,
-            user_id: 0,
+            process_id: signal_energy_nexus::ProcessId(std::process::id() as i64),
+            user_id: signal_energy_nexus::UserId(0),
         },
         input,
     }
@@ -96,13 +96,13 @@ fn call(input: Query) -> Vec<u8> {
     .to_vec()
 }
 
-fn response(stream: &mut UnixStream) -> Response {
-    Signal::<Response>::from(stream.read_frame().unwrap())
+fn response(stream: &mut UnixStream) -> Output {
+    Signal::<Output>::from(stream.read_frame().unwrap())
         .restore()
         .unwrap()
 }
 
-fn ask(place: &Place, input: Query) -> Response {
+fn ask(place: &Place, input: Input) -> Output {
     let mut question = UnixStream::connect(place.public()).unwrap();
     question.set_read_timeout(Some(EVENT_WAIT)).unwrap();
     question.write_frame(&call(input)).unwrap();
@@ -198,8 +198,8 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
 
     let mut changes = UnixStream::connect(place.public()).unwrap();
     changes.set_read_timeout(Some(EVENT_WAIT)).unwrap();
-    changes.write_frame(&call(Query::Subscribe)).unwrap();
-    assert_eq!(response(&mut changes), Response::Subscribed);
+    changes.write_frame(&call(Input::Subscribe)).unwrap();
+    assert_eq!(response(&mut changes), Output::Subscribed);
 
     // The first Flow: its opening reads Codex once.
     let (mut peer, query) = accepted(&first);
@@ -209,10 +209,10 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
     );
     write_flow_frame(&mut peer, &opening(unix_now() - 5));
     let read_first = match response(&mut changes) {
-        Response::Changed(changed) => changed.reading,
+        Output::Changed(changed) => changed.reading,
         other => panic!("the first reading pushes its level, got {other:?}"),
     };
-    assert_eq!(read_first.window_vector[0].used, Percent(8));
+    assert_eq!(read_first.window_vector[0].used, signal_energy_nexus::Used(Percent(8)));
     assert_eq!(reads(&log), 1);
 
     // Flow goes: it closes the subscription and removes its socket.
@@ -222,8 +222,8 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
 
     // Energy runs on: asked, the daemon answers from memory and reads
     // nothing, since no turn end is newer than its reading.
-    match ask(&place, Query::Read(Provider::Codex)) {
-        Response::Read(read) => assert_eq!(read.reading, read_first),
+    match ask(&place, Input::Read(Provider::Codex)) {
+        Output::Read(read) => assert_eq!(read.reading, read_first),
         other => panic!("answered from memory, got {other:?}"),
     }
     assert_eq!(reads(&log), 1, "no read while Flow is absent");
@@ -240,9 +240,9 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
     );
     write_flow_frame(&mut peer, &opening(unix_now()));
     match response(&mut changes) {
-        Response::Changed(changed) => {
+        Output::Changed(changed) => {
             assert_eq!(changed.provider, Provider::Codex);
-            assert_eq!(changed.reading.window_vector[0].used, Percent(97));
+            assert_eq!(changed.reading.window_vector[0].used, signal_energy_nexus::Used(Percent(97)));
         }
         other => panic!("the reopening reads the stale provider, got {other:?}"),
     }

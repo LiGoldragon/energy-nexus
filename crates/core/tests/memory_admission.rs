@@ -150,7 +150,7 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
     let configuration = memory.configuration();
     assert!(configuration.thresholds.contains(&Threshold {
         level: Level::Fair,
-        left: Percent(25)
+        left: signal_energy_nexus::Left(Percent(25))
     }));
     assert_eq!(configuration.redeem_expiring, Minutes(720));
     assert_eq!(configuration.redeem_used_at_least, Percent(3));
@@ -172,7 +172,7 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
     assert_eq!(claude.reading.window_vector.len(), 3);
     let codex = memory.latest(&Provider::Codex).expect("Codex's latest");
     assert_eq!(codex.level, Level::Out);
-    assert_eq!(codex.reading.at, Instant(1762210360));
+    assert_eq!(codex.reading.at, signal_energy_nexus::At(Instant(1762210360)));
     assert_eq!(
         uncarried.iter().map(ToString::to_string).collect::<Vec<_>>(),
         [
@@ -366,7 +366,7 @@ fn version_one_file() -> Vec<u8> {
             polling: Minutes(7),
             thresholds: vec![Threshold {
                 level: Level::Fair,
-                left: Percent(30),
+                left: signal_energy_nexus::Left(Percent(30)),
             }],
             reminders: vec![Reminder {
                 provider: Provider::Codex,
@@ -408,7 +408,7 @@ fn a_stored_polling_interval_is_dropped_by_the_upgrade() {
     assert_eq!(configuration.redeem_used_at_least, Percent(2));
     assert!(configuration.thresholds.contains(&Threshold {
         level: Level::Fair,
-        left: Percent(30)
+        left: signal_energy_nexus::Left(Percent(30))
     }));
     assert_eq!(configuration.reminders.len(), 1);
     // Written as version 2, which has no interval, and read back as it is.

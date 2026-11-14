@@ -1,8 +1,8 @@
 use energy_nexus_wire::{Earlier, Envelope, Persisted, Upgrade};
 use meta_signal_energy_nexus::{ProviderTarget, Set, WindowTarget};
 use signal_energy_nexus::{
-    Instant, Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus,
-    Standing, Target, Threshold,
+    Expected, Instant, Left, Level, Minutes, Pace, PerDay, Percent, Provider, Reading, Reminder,
+    Reset, ResetStatus, Standing, Target, Threshold, Used,
 };
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -26,15 +26,15 @@ impl Default for Configuration {
             thresholds: vec![
                 Threshold {
                     level: Level::Plenty,
-                    left: Percent(50),
+                    left: Left(Percent(50)),
                 },
                 Threshold {
                     level: Level::Fair,
-                    left: Percent(20),
+                    left: Left(Percent(20)),
                 },
                 Threshold {
                     level: Level::Low,
-                    left: Percent(0),
+                    left: Left(Percent(0)),
                 },
             ],
             reminders: Vec::new(),
@@ -71,7 +71,7 @@ impl Configuration {
             return Err("percent must be between 0 and 100".into());
         }
         for threshold in &self.thresholds {
-            if threshold.level == Level::Out || !(0..=100).contains(&threshold.left.0) {
+            if threshold.level == Level::Out || !(0..=100).contains(&threshold.left.0.0) {
                 return Err(
                     "Out follows provider allowance; threshold percent must be between 0 and 100"
                         .into(),
@@ -288,17 +288,17 @@ impl Pacing for Reading {
                             .map(|configured| configured.target.clone())
                     })
                     .unwrap_or(Target::Even);
-                let used = window.used.0.clamp(0, 100);
-                let start = window.resets.0 - window.duration.0 * 60;
+                let used = window.used.0.0.clamp(0, 100);
+                let start = window.resets.0.0 - window.duration.0.0 * 60;
                 let deadline = match &target {
-                    Target::Even => window.resets.0,
+                    Target::Even => window.resets.0.0,
                     Target::SpendBy(instant) => instant.0,
                 };
                 let span = (deadline - start).max(1);
-                let elapsed = (self.at.0 - start).clamp(0, span);
+                let elapsed = (self.at.0.0 - start).clamp(0, span);
                 let expected = ((elapsed * 100 + span / 2) / span).clamp(0, 100);
-                let seconds_left = (deadline - self.at.0).max(1);
-                let per_day = if used >= 100 || deadline <= self.at.0 {
+                let seconds_left = (deadline - self.at.0.0).max(1);
+                let per_day = if used >= 100 || deadline <= self.at.0.0 {
                     0
                 } else {
                     (((100 - used) * 86_400 + seconds_left / 2) / seconds_left).max(1)
@@ -307,14 +307,14 @@ impl Pacing for Reading {
                     provider: self.provider.clone(),
                     name: window.name.clone(),
                     target,
-                    expected: Percent(expected),
-                    used: Percent(used),
+                    expected: Expected(Percent(expected)),
+                    used: Used(Percent(used)),
                     standing: match used.cmp(&expected) {
                         std::cmp::Ordering::Greater => Standing::Over,
                         std::cmp::Ordering::Less => Standing::Under,
                         std::cmp::Ordering::Equal => Standing::On,
                     },
-                    per_day: Percent(per_day),
+                    per_day: PerDay(Percent(per_day)),
                 }
             })
             .collect()
@@ -331,8 +331,8 @@ impl Resetting for Reading {
     fn next_reset(&self) -> Option<Instant> {
         self.window_vector
             .iter()
-            .map(|window| window.resets.0)
-            .filter(|resets| *resets > self.at.0)
+            .map(|window| window.resets.0.0)
+            .filter(|resets| *resets > self.at.0.0)
             .min()
             .map(Instant)
     }
@@ -343,21 +343,21 @@ pub trait Levelling {
 }
 impl Levelling for Reading {
     fn level(&self, configuration: &Configuration) -> Level {
-        if !self.allowed {
+        if !self.allowed.0 {
             return Level::Out;
         }
         let left = 100
             - self
                 .window_vector
                 .iter()
-                .map(|window| window.used.0)
+                .map(|window| window.used.0.0)
                 .max()
                 .unwrap_or(0);
         configuration
             .thresholds
             .iter()
-            .filter(|threshold| threshold.level != Level::Out && left >= threshold.left.0)
-            .max_by_key(|threshold| threshold.left.0)
+            .filter(|threshold| threshold.level != Level::Out && left >= threshold.left.0.0)
+            .max_by_key(|threshold| threshold.left.0.0)
             .map(|threshold| threshold.level.clone())
             .unwrap_or(Level::Low)
     }
@@ -407,7 +407,7 @@ impl Configuring for Memory {
                 return Err("percent must be between 0 and 100".into())
             }
             Set::Threshold(value)
-                if value.level == Level::Out || !(0..=100).contains(&value.left.0) =>
+                if value.level == Level::Out || !(0..=100).contains(&value.left.0.0) =>
             {
                 return Err(
                     "Out follows provider allowance; threshold percent must be between 0 and 100"
@@ -471,7 +471,7 @@ impl Redeeming for Memory {
             .reset_vector
             .iter()
             .filter(|reset| reset.reset_status == ResetStatus::Available)
-            .min_by_key(|reset| reset.expires.0)
+            .min_by_key(|reset| reset.expires.0.0)
             .cloned()
         else {
             return RedeemDecision::NoReset;
@@ -481,10 +481,10 @@ impl Redeeming for Memory {
             .window_vector
             .iter()
             .find(|window| window.name == signal_energy_nexus::Name::Week)
-            .map(|window| window.used.0)
+            .map(|window| window.used.0.0)
             .unwrap_or(0);
-        let expiring = reset.expires.0 - now <= self.configuration.redeem_expiring.0 * 60;
-        if !latest.reading.allowed
+        let expiring = reset.expires.0.0 - now <= self.configuration.redeem_expiring.0 * 60;
+        if !latest.reading.allowed.0
             || (expiring && week_used >= self.configuration.redeem_used_at_least.0)
         {
             RedeemDecision::Allowed(reset)
@@ -513,7 +513,7 @@ mod tests {
     use super::*;
     use energy_nexus_wire::{Admission, MemoryRefusal};
     use ethos_zero::{Actualizing, File, Potential, Validating};
-    use signal_energy_nexus::{Instant, Name, Window};
+    use signal_energy_nexus::{Allowed, At, Duration, Expires, Instant, Name, Resets, Window};
 
     fn assert_ethos(source: &str) {
         let file = Potential::<File>::from(source).actualize().unwrap();
@@ -534,19 +534,19 @@ mod tests {
     fn reading(allowed: bool, used: i64) -> Reading {
         Reading {
             provider: Provider::Codex,
-            allowed,
+            allowed: Allowed(allowed),
             window_vector: vec![Window {
                 name: Name::Week,
-                used: Percent(used),
-                resets: Instant(200),
-                duration: Minutes(10080),
+                used: Used(Percent(used)),
+                resets: Resets(Instant(200)),
+                duration: Duration(Minutes(10080)),
             }],
             reset_vector: vec![Reset {
                 reset_id: signal_energy_nexus::ResetId("soon".into()),
                 reset_status: ResetStatus::Available,
-                expires: Instant(130),
+                expires: Expires(Instant(130)),
             }],
-            at: Instant(100),
+            at: At(Instant(100)),
         }
     }
     #[test]
@@ -576,38 +576,38 @@ mod tests {
     #[test]
     fn pace_compares_week_usage_to_spend_by_target() {
         let mut value = reading(true, 92);
-        value.at = Instant(50);
-        value.window_vector[0].resets = Instant(150);
-        value.window_vector[0].duration = Minutes(2);
+        value.at = At(Instant(50));
+        value.window_vector[0].resets = Resets(Instant(150));
+        value.window_vector[0].duration = Duration(Minutes(2));
         let mut configuration = Configuration::default();
         configuration.targets = vec![ProviderTarget {
             provider: Provider::Codex,
             target: Target::SpendBy(Instant(170)),
         }];
         let pace = value.pace(&configuration).remove(0);
-        assert_eq!(pace.used, Percent(92));
+        assert_eq!(pace.used, Used(Percent(92)));
         assert_eq!(pace.standing, Standing::Over);
-        assert!(pace.expected.0 < pace.used.0);
+        assert!(pace.expected.0.0 < pace.used.0.0);
     }
     #[test]
     fn the_next_reset_is_the_soonest_window_reset_after_the_reading() {
         let mut value = reading(true, 10);
         value.window_vector.push(Window {
             name: Name::Session,
-            used: Percent(5),
-            resets: Instant(150),
-            duration: Minutes(300),
+            used: Used(Percent(5)),
+            resets: Resets(Instant(150)),
+            duration: Duration(Minutes(300)),
         });
         value.window_vector.push(Window {
             name: Name::FableWeek,
-            used: Percent(5),
-            resets: Instant(0),
-            duration: Minutes(10080),
+            used: Used(Percent(5)),
+            resets: Resets(Instant(0)),
+            duration: Duration(Minutes(10080)),
         });
         assert_eq!(value.next_reset(), Some(Instant(150)));
-        value.at = Instant(150);
+        value.at = At(Instant(150));
         assert_eq!(value.next_reset(), Some(Instant(200)), "a reset at the reading is past");
-        value.at = Instant(200);
+        value.at = At(Instant(200));
         assert_eq!(value.next_reset(), None);
     }
     #[test]
@@ -615,9 +615,9 @@ mod tests {
         let mut value = reading(true, 40);
         value.window_vector.push(Window {
             name: Name::FableWeek,
-            used: Percent(60),
-            resets: Instant(200),
-            duration: Minutes(10080),
+            used: Used(Percent(60)),
+            resets: Resets(Instant(200)),
+            duration: Duration(Minutes(10080)),
         });
         let mut configuration = Configuration::default();
         configuration.window_targets = vec![WindowTarget {
@@ -695,7 +695,7 @@ mod tests {
                 1 => memory.configuration.redeem_used_at_least = Percent(101),
                 _ => memory.configuration.thresholds.push(Threshold {
                     level: Level::Out,
-                    left: Percent(10),
+                    left: Left(Percent(10)),
                 }),
             }
             // admission of a file holding the invalid configuration, built by test encoding

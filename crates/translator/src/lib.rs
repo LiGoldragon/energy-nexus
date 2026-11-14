@@ -11,7 +11,8 @@ use energy_nexus_wire::{
 use serde_json::{json, Value};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{
-    Instant, Level, Minutes, Name, Percent, Provider, Reading, Reset, ResetId, ResetStatus, Window,
+    Allowed, At, Duration, Expires, Instant, Level, Minutes, Name, Percent, Provider, Reading,
+    Reset, ResetId, ResetStatus, Resets, Used, Window,
 };
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -395,11 +396,11 @@ impl Translator {
             return;
         };
         let mut budget = budget();
-        let mut potential = Potential::<signal_energy_nexus::Query>::from(text.as_str());
+        let mut potential = Potential::<signal_energy_nexus::Input>::from(text.as_str());
         let Ok(query) = potential.actualize(&mut budget) else {
             return;
         };
-        let subscribe = matches!(query, signal_energy_nexus::Query::Subscribe);
+        let subscribe = matches!(query, signal_energy_nexus::Input::Subscribe);
         let Ok(mut nexus) = UnixStream::connect(self.place.public()) else {
             return;
         };
@@ -417,7 +418,7 @@ impl Translator {
             let Ok(bytes) = nexus.read_frame() else {
                 return;
             };
-            let Ok(response) = Signal::<signal_energy_nexus::Response>::from(bytes).restore()
+            let Ok(response) = Signal::<signal_energy_nexus::Output>::from(bytes).restore()
             else {
                 return;
             };
@@ -438,19 +439,19 @@ impl Translator {
             return;
         };
         let mut budget = budget();
-        let mut potential = Potential::<meta_signal_energy_nexus::Query>::from(text.as_str());
+        let mut potential = Potential::<meta_signal_energy_nexus::Input>::from(text.as_str());
         let Ok(query) = potential.actualize(&mut budget) else {
             return;
         };
-        let meta_signal_energy_nexus::Query::Configure(set) = &query;
+        let meta_signal_energy_nexus::Input::Configure(set) = &query;
         match self.configure(set) {
             Ok(true) => {
-                let response = meta_signal_energy_nexus::Response::Configured(set.clone());
+                let response = meta_signal_energy_nexus::Output::Configured(set.clone());
                 let _ = client.write_frame(encode(&response).as_bytes());
                 return;
             }
             Err(reason) => {
-                let response = meta_signal_energy_nexus::Response::ConfigureRefused(reason);
+                let response = meta_signal_energy_nexus::Output::ConfigureRefused(reason);
                 let _ = client.write_frame(encode(&response).as_bytes());
                 return;
             }
@@ -472,7 +473,7 @@ impl Translator {
         let Ok(bytes) = nexus.read_frame() else {
             return;
         };
-        let Ok(response) = Signal::<meta_signal_energy_nexus::Response>::from(bytes).restore()
+        let Ok(response) = Signal::<meta_signal_energy_nexus::Output>::from(bytes).restore()
         else {
             return;
         };
@@ -483,8 +484,8 @@ fn caller(stream: &UnixStream) -> Option<signal_energy_nexus::Caller> {
     let credentials =
         nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials).ok()?;
     Some(signal_energy_nexus::Caller {
-        process_id: credentials.pid() as i64,
-        user_id: credentials.uid() as i64,
+        process_id: signal_energy_nexus::ProcessId(credentials.pid() as i64),
+        user_id: signal_energy_nexus::UserId(credentials.uid() as i64),
     })
 }
 fn encode<T: datom_codec::Datomizable>(value: &T) -> String {
@@ -565,15 +566,15 @@ fn codex_reading(value: &Value) -> Option<Reading> {
             } else {
                 Name::Session
             },
-            used: Percent(
+            used: Used(Percent(
                 window
                     .get("usedPercent")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0)
                     .round() as i64,
-            ),
-            resets: Instant(window.get("resetsAt").and_then(Value::as_i64).unwrap_or(0)),
-            duration: Minutes(duration),
+            )),
+            resets: Resets(Instant(window.get("resetsAt").and_then(Value::as_i64).unwrap_or(0))),
+            duration: Duration(Minutes(duration)),
         });
     }
     let resets = value
@@ -591,16 +592,16 @@ fn codex_reading(value: &Value) -> Option<Reading> {
                     "redeemed" => ResetStatus::Redeemed,
                     _ => return None,
                 },
-                expires: Instant(credit.get("expiresAt").and_then(Value::as_i64).unwrap_or(0)),
+                expires: Expires(Instant(credit.get("expiresAt").and_then(Value::as_i64).unwrap_or(0))),
             })
         })
         .collect();
     Some(Reading {
         provider: Provider::Codex,
-        allowed,
+        allowed: Allowed(allowed),
         window_vector: windows,
         reset_vector: resets,
-        at: Instant(now()),
+        at: At(Instant(now())),
     })
 }
 fn claude_reading(credentials_path: &str) -> Option<Reading> {
@@ -637,15 +638,15 @@ fn claude_document(value: &Value) -> Option<Reading> {
         };
         windows.push(Window {
             name,
-            used: Percent(
+            used: Used(Percent(
                 window
                     .get("utilization")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0)
                     .round() as i64,
-            ),
-            resets: Instant(rfc3339(window.get("resets_at").unwrap_or(&Value::Null))),
-            duration: Minutes(duration),
+            )),
+            resets: Resets(Instant(rfc3339(window.get("resets_at").unwrap_or(&Value::Null)))),
+            duration: Duration(Minutes(duration)),
         });
     }
     if let (Some(week), Some(scoped)) = (
@@ -666,18 +667,18 @@ fn claude_document(value: &Value) -> Option<Reading> {
         if allowance > 0.0 {
             windows.push(Window {
                 name: Name::FableWeek,
-                used: Percent((used * 100.0 / allowance).round() as i64),
-                resets: Instant(rfc3339(week.get("resets_at").unwrap_or(&Value::Null))),
-                duration: Minutes(10080),
+                used: Used(Percent((used * 100.0 / allowance).round() as i64)),
+                resets: Resets(Instant(rfc3339(week.get("resets_at").unwrap_or(&Value::Null)))),
+                duration: Duration(Minutes(10080)),
             });
         }
     }
     Some(Reading {
         provider: Provider::Claude,
-        allowed: true,
+        allowed: Allowed(true),
         window_vector: windows,
         reset_vector: Vec::new(),
-        at: Instant(now()),
+        at: At(Instant(now())),
     })
 }
 fn consume_outcome(value: &Value, reset_id: ResetId) -> Outcome {
@@ -685,7 +686,7 @@ fn consume_outcome(value: &Value, reset_id: ResetId) -> Outcome {
         "consumed" => Outcome::Consumed(Consumed::Reset(Reset {
             reset_id,
             reset_status: ResetStatus::Redeemed,
-            expires: Instant(0),
+            expires: Expires(Instant(0)),
         })),
         "nothingToReset" => Outcome::Consumed(Consumed::NothingToReset),
         "noCredit" => Outcome::Consumed(Consumed::NoCredit),
@@ -717,7 +718,7 @@ mod tests {
     fn codex_fixture_maps_windows_and_resets() {
         let value = json!({"ordinaryUsageAllowed":false,"rateLimits":{"primary":{"usedPercent":8,"resetsAt":20,"windowDurationMins":300},"secondary":{"usedPercent":34,"resetsAt":30,"windowDurationMins":10080}},"rateLimitResetCredits":{"credits":[{"id":"rc_1","status":"available","expiresAt":40}]}});
         let reading = codex_reading(&value).unwrap();
-        assert!(!reading.allowed);
+        assert!(!reading.allowed.0);
         assert_eq!(reading.window_vector.len(), 2);
         assert_eq!(reading.reset_vector[0].reset_id.0, "rc_1");
     }
@@ -726,9 +727,9 @@ mod tests {
         let value = json!({"five_hour":{"utilization":8.0,"resets_at":"2026-11-04T10:00:00Z"},"seven_day":{"utilization":34.0,"resets_at":"2026-11-08T10:00:00Z"},"weekly_scoped_shares":[{"allowance_percent_of_weekly":50.0,"used_percent_of_weekly":31.5} ]});
         let reading = claude_document(&value).unwrap();
         assert_eq!(reading.window_vector[1].name, Name::Week);
-        assert_eq!(reading.window_vector[1].used, Percent(34));
+        assert_eq!(reading.window_vector[1].used, Used(Percent(34)));
         assert_eq!(reading.window_vector[2].name, Name::FableWeek);
-        assert_eq!(reading.window_vector[2].used, Percent(63));
+        assert_eq!(reading.window_vector[2].used, Used(Percent(63)));
     }
     #[test]
     fn claude_missing_window_is_absent() {
@@ -828,7 +829,7 @@ sleep 60
     }
     #[test]
     fn meta_query_text_fixture() {
-        let query = meta_signal_energy_nexus::Query::Configure(
+        let query = meta_signal_energy_nexus::Input::Configure(
             meta_signal_energy_nexus::Set::RedeemExpiring(Minutes(720)),
         );
         assert_eq!(encode(&query), "Configure.RedeemExpiring.720");
@@ -837,12 +838,12 @@ sleep 60
     fn meta_query_text_reads_the_bare_minutes_and_refuses_the_braced_form() {
         use datom_codec::{Actualizing, Potential};
         let read = |text: &str| {
-            Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
+            Potential::<meta_signal_energy_nexus::Input>::from(text).actualize(&mut budget())
         };
         let bare = read("Configure.RedeemExpiring.720").expect("the bare form reads");
         assert_eq!(
             bare,
-            meta_signal_energy_nexus::Query::Configure(
+            meta_signal_energy_nexus::Input::Configure(
                 meta_signal_energy_nexus::Set::RedeemExpiring(Minutes(720))
             )
         );
@@ -852,7 +853,7 @@ sleep 60
     fn the_polling_interval_no_longer_reads_at_the_meta_command() {
         use datom_codec::{Actualizing, Potential};
         let read = |text: &str| {
-            Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
+            Potential::<meta_signal_energy_nexus::Input>::from(text).actualize(&mut budget())
         };
         assert!(read("Configure.Polling.5").is_err());
     }
@@ -907,8 +908,8 @@ sleep 60
         );
         assert_eq!(turn_end_outcome(b"not a frame"), Outcome::Down);
     }
-    fn reminder_query() -> meta_signal_energy_nexus::Query {
-        meta_signal_energy_nexus::Query::Configure(
+    fn reminder_query() -> meta_signal_energy_nexus::Input {
+        meta_signal_energy_nexus::Input::Configure(
             meta_signal_energy_nexus::Set::Reminder(signal_energy_nexus::Reminder {
                 provider: Provider::Codex,
                 level: Level::Low,
@@ -920,9 +921,9 @@ sleep 60
             }),
         )
     }
-    fn program_query() -> meta_signal_energy_nexus::Query {
-        meta_signal_energy_nexus::Query::Configure(meta_signal_energy_nexus::Set::Program(
-            meta_signal_energy_nexus::ProgramPath {
+    fn program_query() -> meta_signal_energy_nexus::Input {
+        meta_signal_energy_nexus::Input::Configure(meta_signal_energy_nexus::Set::Program(
+            meta_signal_energy_nexus::Program_Data {
                 program: meta_signal_energy_nexus::Program::Flow,
                 path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow-nexus".into()),
             },
@@ -934,14 +935,14 @@ sleep 60
         for query in [reminder_query(), program_query()] {
             let text = encode(&query);
             println!("meta text: {text}");
-            let read = Potential::<meta_signal_energy_nexus::Query>::from(text.as_str())
+            let read = Potential::<meta_signal_energy_nexus::Input>::from(text.as_str())
                 .actualize(&mut budget())
                 .expect("the printed form reads");
             assert_eq!(read, query);
         }
         // The one-line forms a person types at energy-nexus-meta.
         let typed = |text: &str| {
-            Potential::<meta_signal_energy_nexus::Query>::from(text).actualize(&mut budget())
+            Potential::<meta_signal_energy_nexus::Input>::from(text).actualize(&mut budget())
         };
         assert_eq!(
             typed("Configure.Reminder.{ Codex Low { Mind energyNexus Sol } }").unwrap(),

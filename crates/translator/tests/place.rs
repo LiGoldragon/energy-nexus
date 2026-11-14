@@ -193,11 +193,11 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
     // activation-places.md step 6, as energy-nexus-meta sends it
     use datom_codec::Datomizable;
     use protos::{Protosizable, Textualizable};
-    let set = meta_signal_energy_nexus::Set::Program(meta_signal_energy_nexus::ProgramPath {
+    let set = meta_signal_energy_nexus::Set::Program(meta_signal_energy_nexus::Program_Data {
         program: meta_signal_energy_nexus::Program::Flow,
         path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow-nexus".into()),
     });
-    let text = meta_signal_energy_nexus::Query::Configure(set.clone())
+    let text = meta_signal_energy_nexus::Input::Configure(set.clone())
         .datomize(Vec::new())
         .protosize()
         .textualize();
@@ -205,7 +205,7 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
     let mut meta = UnixStream::connect(shared.place.meta_translator()).unwrap();
     meta.write_frame(text.as_bytes()).unwrap();
     let answer = String::from_utf8(meta.read_frame().unwrap()).unwrap();
-    let configured = meta_signal_energy_nexus::Response::Configured(set)
+    let configured = meta_signal_energy_nexus::Output::Configured(set)
         .datomize(Vec::new())
         .protosize()
         .textualize();
