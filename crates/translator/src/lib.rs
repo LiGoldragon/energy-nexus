@@ -1,7 +1,7 @@
 use datom_codec::{Actualizing, Potential};
 use energy_nexus_emission::{
-    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Emittable, Outcome,
-    Query as EmissionQuery, Response as EmissionResponse, Send, TurnEnd,
+    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission, Emittable,
+    Input as EmissionInput, Observation, Outcome, Output as EmissionOutput, Send, TurnEnd,
 };
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Earlier, Envelope, Framing, MemoryPathing, MemoryRefusal,
@@ -72,8 +72,8 @@ pub struct Translator {
     pub greeting_wait: flow::GreetingWait,
 }
 pub trait Translating {
-    /// One external call: every emission but `TurnEnds`, which is held open
-    /// (`relay_turn_ends`).
+    /// One external call, answered by its own outcome. Flow's turn ends are
+    /// no emission: the Signal's `TurnEnds`, held open (`relay_turn_ends`).
     fn emit(&self, emission: Emission) -> Outcome;
     /// Takes its sockets at its place, announces readiness and serves.
     fn serve(&self) -> std::io::Result<()>;
@@ -91,11 +91,10 @@ pub struct Listening {
 impl Translating for Translator {
     fn emit(&self, emission: Emission) -> Outcome {
         match emission {
-            Emission::CodexRateLimits(value) => value.emit(self),
-            Emission::CodexConsumeReset(value) => value.emit(self),
-            Emission::ClaudeUsage(value) => value.emit(self),
-            Emission::Send(value) => value.emit(self),
-            Emission::TurnEnds(_) => Outcome::Down,
+            Emission::CodexRateLimits(value) => Outcome::CodexRateLimitsObserved(value.emit(self)),
+            Emission::CodexConsumeReset(value) => Outcome::CodexResetConsumed(value.emit(self)),
+            Emission::ClaudeUsage(value) => Outcome::ClaudeUsageObserved(value.emit(self)),
+            Emission::Send(value) => Outcome::ReminderSent(value.emit(self)),
         }
     }
     fn serve(&self) -> std::io::Result<()> {
@@ -187,17 +186,17 @@ pub fn turn_end(flow: &signal_flow::TurnEnd) -> TurnEnd {
             signal_flow::HarnessKind::Claude => Provider::Claude,
             signal_flow::HarnessKind::Codex => Provider::Codex,
         },
-        at: Instant(flow.observed_at.0),
+        at: At(Instant(flow.observed_at.0)),
     }
 }
 /// What one frame from Flow's turn-end subscription says, for the daemon.
-pub(crate) fn turn_end_outcome(frame: &[u8]) -> Outcome {
+pub(crate) fn turn_end_outcome(frame: &[u8]) -> EmissionOutput {
     match rkyv::from_bytes::<signal_flow::Output, rkyv::rancor::Error>(frame) {
         Ok(signal_flow::Output::TurnEndsObserved(ends)) => {
-            Outcome::TurnEndsObserved(ends.iter().map(turn_end).collect())
+            EmissionOutput::TurnEndsObserved(ends.iter().map(turn_end).collect())
         }
-        Ok(signal_flow::Output::TurnEnded(end)) => Outcome::TurnEnded(turn_end(&end)),
-        _ => Outcome::Down,
+        Ok(signal_flow::Output::TurnEnded(end)) => EmissionOutput::TurnEnded(turn_end(&end)),
+        _ => EmissionOutput::Down,
     }
 }
 pub trait CodexCalling {
@@ -252,27 +251,27 @@ impl Drop for AppServer {
     }
 }
 impl Emittable<Translator> for CodexRateLimits {
-    fn emit(&self, translator: &Translator) -> Outcome {
+    fn emit(&self, translator: &Translator) -> Observation {
         translator
             .codex_call("account/rateLimits/read", json!({}))
             .ok()
             .and_then(|value| codex_reading(&value))
-            .map_or(Outcome::Down, Outcome::Observed)
+            .map_or(Observation::Down, Observation::Observed)
     }
 }
 impl Emittable<Translator> for CodexConsumeReset {
-    fn emit(&self, translator: &Translator) -> Outcome {
+    fn emit(&self, translator: &Translator) -> Consumption {
         translator
             .codex_call(
                 "account/rateLimitResetCredit/consume",
                 json!({"creditId":self.reset_id.0,"idempotencyKey":self.idempotency.0}),
             )
             .map(|value| consume_outcome(&value, self.reset_id.clone()))
-            .unwrap_or(Outcome::Down)
+            .unwrap_or(Consumption::Down)
     }
 }
 impl Emittable<Translator> for ClaudeUsage {
-    fn emit(&self, translator: &Translator) -> Outcome {
+    fn emit(&self, translator: &Translator) -> Observation {
         let path = translator
             .programs
             .lock()
@@ -280,11 +279,11 @@ impl Emittable<Translator> for ClaudeUsage {
             .and_then(|programs| programs.claude_credentials.0.clone());
         path.as_deref()
             .and_then(claude_reading)
-            .map_or(Outcome::Down, Outcome::Observed)
+            .map_or(Observation::Down, Observation::Observed)
     }
 }
 impl Emittable<Translator> for Send {
-    fn emit(&self, translator: &Translator) -> Outcome {
+    fn emit(&self, translator: &Translator) -> Delivery {
         let program = translator
             .programs
             .lock()
@@ -293,9 +292,9 @@ impl Emittable<Translator> for Send {
         if program.as_deref().is_some_and(|program| {
             send_reminder(program, &self.recipient, &self.provider, &self.level)
         }) {
-            Outcome::Sent
+            Delivery::Sent
         } else {
-            Outcome::Down
+            Delivery::Down
         }
     }
 }
@@ -383,14 +382,14 @@ impl Translator {
         let Ok(bytes) = stream.read_frame() else {
             return;
         };
-        let Ok(EmissionQuery::Emit(emission)) = Signal::<EmissionQuery>::from(bytes).restore()
-        else {
+        let Ok(input) = Signal::<EmissionInput>::from(bytes).restore() else {
             return;
         };
-        if matches!(emission, Emission::TurnEnds(_)) {
-            return self.relay_turn_ends(stream);
-        }
-        if let Ok(signal) = EmissionResponse::Emitted(self.emit(emission)).signalize() {
+        let emission = match input {
+            EmissionInput::Emit(emission) => emission,
+            EmissionInput::TurnEnds => return self.relay_turn_ends(stream),
+        };
+        if let Ok(signal) = EmissionOutput::Emitted(self.emit(emission)).signalize() {
             let _ = stream.write_frame(signal.bytes());
         }
     }
@@ -690,17 +689,17 @@ fn claude_document(value: &Value) -> Option<Reading> {
         at: At(Instant(now())),
     })
 }
-fn consume_outcome(value: &Value, reset_id: ResetId) -> Outcome {
+fn consume_outcome(value: &Value, reset_id: ResetId) -> Consumption {
     match value.get("outcome").and_then(Value::as_str).unwrap_or("") {
-        "consumed" => Outcome::Consumed(Consumed::Reset(Reset {
+        "consumed" => Consumption::Reset(Reset {
             reset_id,
             reset_status: ResetStatus::Redeemed,
             expires: Expires(Instant(0)),
-        })),
-        "nothingToReset" => Outcome::Consumed(Consumed::NothingToReset),
-        "noCredit" => Outcome::Consumed(Consumed::NoCredit),
-        "alreadyRedeemed" => Outcome::Consumed(Consumed::AlreadyRedeemed),
-        _ => Outcome::Down,
+        }),
+        "nothingToReset" => Consumption::NothingToReset,
+        "noCredit" => Consumption::NoCredit,
+        "alreadyRedeemed" => Consumption::AlreadyRedeemed,
+        _ => Consumption::Down,
     }
 }
 /// Sends one reminder through the configured Flow client, as Flow's own
@@ -899,7 +898,7 @@ sleep 60
                 turn_end(&flow_turn_end(harness, model)),
                 TurnEnd {
                     provider,
-                    at: Instant(1_762_210_000)
+                    at: At(Instant(1_762_210_000))
                 }
             );
         }
@@ -917,13 +916,13 @@ sleep 60
                 claude.clone(),
                 codex.clone()
             ]))),
-            Outcome::TurnEndsObserved(vec![turn_end(&claude), turn_end(&codex)])
+            EmissionOutput::TurnEndsObserved(vec![turn_end(&claude), turn_end(&codex)])
         );
         assert_eq!(
             turn_end_outcome(&frame(&Output::TurnEnded(codex.clone()))),
-            Outcome::TurnEnded(turn_end(&codex))
+            EmissionOutput::TurnEnded(turn_end(&codex))
         );
-        assert_eq!(turn_end_outcome(b"not a frame"), Outcome::Down);
+        assert_eq!(turn_end_outcome(b"not a frame"), EmissionOutput::Down);
     }
     fn reminder_query() -> meta_signal_energy_nexus::Input {
         meta_signal_energy_nexus::Input::Configure(

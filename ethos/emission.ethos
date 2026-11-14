@@ -1,16 +1,17 @@
-Signal
-[ energy:[ Reading ResetId Recipient Level Provider Instant ] ] ; imports Energy Nexus vocabulary
-[ Emit.Emission ]                                          ; the short-term Signal wrapper for emissions
-[ Emitted.Outcome ]                                        ; answers the wrapped emission
-[ Emission.[ CodexRateLimits                               ; one external call per emission variant
-             CodexConsumeReset.{ ResetId Idempotency.String } ; consumes one reset idempotently
-             ClaudeUsage
-             Send.{ Recipient Provider Level }             ; sends one reminder
-             TurnEnds ]                                    ; Flow Observe.TurnEnds at the place, held open
-  TurnEnd.{ Provider At.Instant }                          ; a turn ended on a provider
-  Outcome.[ Observed.Reading                               ; what the translator observed
-            Consumed.[ Reset NothingToReset NoCredit AlreadyRedeemed ] ; the reset-consumption outcomes
-            Sent
-            TurnEndsObserved.Vector<TurnEnd>               ; on open: the last turn end on each provider
-            TurnEnded.TurnEnd                              ; then each turn end as it comes
-            Down ] ]
+Emission
+[ signal_energy_nexus:[ Reading ResetId Recipient Level Provider Reset ] ] ; imports the Energy vocabulary
+[ CodexRateLimits                                          ; one external call per emission, the n-th outcome its own
+  CodexConsumeReset
+  ClaudeUsage
+  Send ]
+[ CodexRateLimitsObserved.Observation                      ; Codex's rate limits, read through its app-server
+  CodexResetConsumed.Consumption                           ; one reset consumed, idempotently
+  ClaudeUsageObserved.Observation                          ; Claude's usage, read with its credentials
+  ReminderSent.Delivery ]                                  ; one reminder sent through the Flow Nexus client
+[ CodexRateLimits.{}                                       ; carries nothing, so that it bears Emittable
+  ClaudeUsage.{}                                           ; carries nothing, so that it bears Emittable
+  CodexConsumeReset.{ ResetId Idempotency.String }
+  Send.{ Recipient Provider Level }
+  Observation.[ Observed.Reading Down ]                    ; what the translator observed, or the provider down
+  Consumption.[ Reset NothingToReset NoCredit AlreadyRedeemed Down ] ; the reset-consumption outcomes
+  Delivery.[ Sent Down ] ]                                 ; the reminder submitted, or not

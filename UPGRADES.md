@@ -14,7 +14,7 @@ No Energy wire or memory change. Repins signal-energy-nexus to `e0eb9b7` and met
 
 **The reminder is Flow's typed Send.** The translator builds `signal_flow::Input::Send(SendRequest { address, Soft(Notice(…)) })` and passes its datom, printed on one line, to the configured Flow client; the text is the one the `format!` wrote, `Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }`.
 
-**Still hand-written here** (later steps): the emission contract of `crates/emission`.
+**The emission contract generated (internal wire change).** `ethos/emission.ethos` is an Emission root: the four calls `CodexRateLimits`, `CodexConsumeReset`, `ClaudeUsage`, `Send`, each with its own outcome (`CodexRateLimitsObserved.Observation`, `CodexResetConsumed.Consumption`, `ClaudeUsageObserved.Observation`, `ReminderSent.Delivery`), each outcome carrying its own `Down`, and the generated `Emitted`/`Emittable` binding each call to its outcome. `ethos/emission_signal.ethos` is the Signal over `energy-emission.sock`: `Emit.Emission` answered `Emitted.Outcome`, and `TurnEnds`, a subscription answered `TurnEndsObserved`, then `TurnEnded` per turn end, or `Down`. `TurnEnd.at` is the library's `At`. A call that carries nothing is declared `CodexRateLimits.{}`, an empty record, because ethos-zero 28 binds `Emittable` only to an emission that carries a type. The tags on this socket moved: the daemon and the translator ship in this one package and must run the same release.
 
 ## 0.3.3 — signal-flow 63: Input and Output
 

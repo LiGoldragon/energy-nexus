@@ -153,6 +153,8 @@ dependencies = [
 name = "energy-nexus-emission"
 version = "0.3.3"
 dependencies = [
+ "datom-codec",
+ "ethos-zero 28.0.0",
  "rkyv",
  "signal",
  "signal-energy-nexus",

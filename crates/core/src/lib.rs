@@ -528,22 +528,8 @@ mod tests {
     use super::*;
     use energy_nexus_wire::{Admission, MemoryRefusal};
     use meta_signal_energy_nexus::WindowTarget;
-    use ethos_zero::{Actualizing, File, Potential, Validating};
     use signal_energy_nexus::{Allowed, At, Duration, Expires, Instant, Name, Resets, Window};
 
-    fn assert_ethos(source: &str) {
-        let file = Potential::<File>::from(source).actualize().unwrap();
-        file.validate().unwrap();
-    }
-
-    #[test]
-    fn ethos_declarations_check() {
-        for source in [
-            include_str!("../../../ethos/emission.ethos"),
-        ] {
-            assert_ethos(source);
-        }
-    }
     fn reading(allowed: bool, used: i64) -> Reading {
         Reading {
             provider: Provider::Codex,

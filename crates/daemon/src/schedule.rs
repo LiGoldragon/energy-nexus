@@ -216,7 +216,7 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
             Event::TurnEndsObserved(ends) => {
                 for end in ends {
                     let track = self.track(&end.provider);
-                    track.turn_ended_at = track.turn_ended_at.max(Some(end.at.0));
+                    track.turn_ended_at = track.turn_ended_at.max(Some(end.at.0.0));
                     if track.stale() {
                         self.want(end.provider);
                     }
@@ -224,7 +224,7 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
             }
             Event::TurnEnded(end) => {
                 let track = self.track(&end.provider);
-                track.turn_ended_at = track.turn_ended_at.max(Some(end.at.0));
+                track.turn_ended_at = track.turn_ended_at.max(Some(end.at.0.0));
                 self.want(end.provider);
             }
             Event::Question(provider, answer) => {
@@ -511,7 +511,7 @@ mod tests {
     fn ended(provider: Provider, at: i64) -> Event {
         Event::TurnEnded(TurnEnd {
             provider,
-            at: Instant(at),
+            at: signal_energy_nexus::At(Instant(at)),
         })
     }
 
@@ -632,7 +632,7 @@ mod tests {
         events
             .send(Event::TurnEndsObserved(vec![TurnEnd {
                 provider: Provider::Codex,
-                at: Instant(START - 900),
+                at: signal_energy_nexus::At(Instant(START - 900)),
             }]))
             .unwrap();
         let answer = asked(&events, Provider::Codex).await;
@@ -693,11 +693,11 @@ mod tests {
             .send(Event::TurnEndsObserved(vec![
                 TurnEnd {
                     provider: Provider::Claude,
-                    at: Instant(START - 60),
+                    at: signal_energy_nexus::At(Instant(START - 60)),
                 },
                 TurnEnd {
                     provider: Provider::Codex,
-                    at: Instant(START - 900),
+                    at: signal_energy_nexus::At(Instant(START - 900)),
                 },
             ]))
             .unwrap();

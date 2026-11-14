@@ -3,8 +3,18 @@ name="energy-nexus-emission"
 version = "0.3.3"
 edition.workspace=true
 rust-version.workspace=true
+build = "build.rs"
+
+[features]
+default = []
+# The generated records' datom derives; the Nexus process builds without them.
+datom = ["dep:datom-codec", "signal-energy-nexus/datom"]
 
 [dependencies]
 signal-energy-nexus.workspace=true
 rkyv.workspace=true
 signal.workspace=true
+datom-codec={git="https://github.com/LiGoldragon/datom-codec",rev="09a0526",optional=true}
+
+[build-dependencies]
+ethos-zero={git="https://github.com/LiGoldragon/ethos-zero",rev="970459d"}

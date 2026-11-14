@@ -1,0 +1,10 @@
+Signal
+[ crate:[ Emission Outcome ]
+  signal_energy_nexus:[ Provider At ] ]                   ; imports the emissions and the Energy vocabulary
+[ Emit.Emission                                            ; one external call, through the translator
+  TurnEnds ]                                               ; the Flow Nexus's turn ends at the place, held open
+[ Emitted.Outcome                                          ; the call's own outcome
+  TurnEndsObserved.Vector<TurnEnd>                         ; on open: the last turn end on each provider
+  TurnEnded.TurnEnd                                        ; then each turn end as it comes, answering no input
+  Down ]                                                   ; the turn ends closed: the translator's watch on the place is lost
+[ TurnEnd.{ Provider At } ]                                ; a turn ended on a provider

@@ -5,9 +5,9 @@ use energy_nexus_core::{
     Configuring, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering, Reminding,
 };
 use energy_nexus_emission::{
-    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
-    Outcome as ExternalOutcome, Query as EmissionQuery, Response as EmissionResponse, Send,
-    TurnEnds,
+    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission,
+    Idempotency, Input as EmissionInput, Observation, Outcome as ExternalOutcome,
+    Output as EmissionOutput, Send,
 };
 use schedule::{Event, Reads, Schedule, WallClock};
 use energy_nexus_wire::{
@@ -32,18 +32,20 @@ impl Emitting for Nexus {
     fn emit(&self, emission: Emission) -> Result<ExternalOutcome, String> {
         let mut stream =
             UnixStream::connect(self.place.emission()).map_err(|error| error.to_string())?;
-        let signal = EmissionQuery::Emit(emission)
+        let signal = EmissionInput::Emit(emission)
             .signalize()
             .map_err(|error| format!("{error:?}"))?;
         stream
             .write_frame(signal.bytes())
             .map_err(|error| error.to_string())?;
         let bytes = stream.read_frame().map_err(|error| error.to_string())?;
-        let response = Signal::<EmissionResponse>::from(bytes)
+        match Signal::<EmissionOutput>::from(bytes)
             .restore()
-            .map_err(|error| format!("{error:?}"))?;
-        let EmissionResponse::Emitted(outcome) = response;
-        Ok(outcome)
+            .map_err(|error| format!("{error:?}"))?
+        {
+            EmissionOutput::Emitted(outcome) => Ok(outcome),
+            other => Err(format!("the translator answered an emission with {other:?}")),
+        }
     }
 }
 impl Nexus {
@@ -59,11 +61,14 @@ impl Nexus {
         match operation {
             Operation::Reading(provider) => {
                 let emission = match provider {
-                    Provider::Codex => Emission::CodexRateLimits(CodexRateLimits),
-                    Provider::Claude => Emission::ClaudeUsage(ClaudeUsage),
+                    Provider::Codex => Emission::CodexRateLimits(CodexRateLimits {}),
+                    Provider::Claude => Emission::ClaudeUsage(ClaudeUsage {}),
                 };
                 match self.emit(emission) {
-                    Ok(ExternalOutcome::Observed(reading)) => OperationOutcome::Read(reading),
+                    Ok(ExternalOutcome::CodexRateLimitsObserved(Observation::Observed(reading)))
+                    | Ok(ExternalOutcome::ClaudeUsageObserved(Observation::Observed(reading))) => {
+                        OperationOutcome::Read(reading)
+                    }
                     _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                 }
             }
@@ -85,7 +90,7 @@ impl Nexus {
                     provider: reading.provider,
                     level,
                 })) {
-                    Ok(ExternalOutcome::Sent) => OperationOutcome::Reminded,
+                    Ok(ExternalOutcome::ReminderSent(Delivery::Sent)) => OperationOutcome::Reminded,
                     _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                 }
             }
@@ -101,12 +106,12 @@ impl Nexus {
                             reset_id: reset.reset_id.clone(),
                             idempotency: key,
                         })) {
-                            Ok(ExternalOutcome::Consumed(Consumed::Reset(value))) => {
+                            Ok(ExternalOutcome::CodexResetConsumed(Consumption::Reset(value))) => {
                                 OperationOutcome::Redeemed(value)
                             }
-                            Ok(ExternalOutcome::Consumed(Consumed::AlreadyRedeemed)) => {
-                                OperationOutcome::Redeemed(reset)
-                            }
+                            Ok(ExternalOutcome::CodexResetConsumed(
+                                Consumption::AlreadyRedeemed,
+                            )) => OperationOutcome::Redeemed(reset),
                             _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                         }
                     }
@@ -207,7 +212,7 @@ impl Reads for Daemon {
         .unwrap_or(down)
     }
 }
-/// Holds Flow's turn ends open through the translator, `Emit.TurnEnds`, and
+/// Holds Flow's turn ends open through the translator, `TurnEnds`, and
 /// hands each to the schedule. Flow going does not end it: the translator
 /// waits for Flow's socket and subscribes again, and the new opening comes
 /// on this same connection, taken as the first. It ends when the translator
@@ -217,7 +222,7 @@ fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) 
     let opened = UnixStream::connect(place.emission())
         .map_err(|error| error.to_string())
         .and_then(|mut stream| {
-            let signal = EmissionQuery::Emit(Emission::TurnEnds(TurnEnds))
+            let signal = EmissionInput::TurnEnds
                 .signalize()
                 .map_err(|error| format!("{error:?}"))?;
             stream
@@ -236,14 +241,10 @@ fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) 
         let event = stream
             .read_frame()
             .ok()
-            .and_then(|bytes| Signal::<EmissionResponse>::from(bytes).restore().ok());
+            .and_then(|bytes| Signal::<EmissionOutput>::from(bytes).restore().ok());
         let event = match event {
-            Some(EmissionResponse::Emitted(ExternalOutcome::TurnEndsObserved(ends))) => {
-                Event::TurnEndsObserved(ends)
-            }
-            Some(EmissionResponse::Emitted(ExternalOutcome::TurnEnded(end))) => {
-                Event::TurnEnded(end)
-            }
+            Some(EmissionOutput::TurnEndsObserved(ends)) => Event::TurnEndsObserved(ends),
+            Some(EmissionOutput::TurnEnded(end)) => Event::TurnEnded(end),
             _ => {
                 eprintln!(
                     "energy-nexus: the translator closed Flow's turn ends; window resets and \

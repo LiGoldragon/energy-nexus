@@ -17,7 +17,7 @@
 //! digest of the contract it was built with. Any other answer is a typed
 //! `SubscriptionFailure` and the connection is closed with no query sent.
 use crate::{turn_end_outcome, FlowFraming};
-use energy_nexus_emission::{Outcome, Response as EmissionResponse};
+use energy_nexus_emission::Output as EmissionOutput;
 use energy_nexus_wire::Framing;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
@@ -291,7 +291,7 @@ enum Waited {
     WatchLost,
 }
 
-/// The daemon's `Emit.TurnEnds`, held open for as long as the daemon holds
+/// The daemon's `TurnEnds`, held open for as long as the daemon holds
 /// it, across every time Flow goes and comes back.
 pub struct TurnEndRelay<S: SubscribesToFlow> {
     watch: FlowWatch,
@@ -300,9 +300,9 @@ pub struct TurnEndRelay<S: SubscribesToFlow> {
 }
 const DAEMON: u64 = 0;
 const OTHER: u64 = 1;
-/// One outcome to the daemon, as the emission socket answers.
-fn send(daemon: &mut UnixStream, outcome: Outcome) -> Result<(), String> {
-    EmissionResponse::Emitted(outcome)
+/// One output to the daemon, as the emission socket answers its `TurnEnds`.
+fn send(daemon: &mut UnixStream, output: EmissionOutput) -> Result<(), String> {
+    output
         .signalize()
         .map_err(|error| format!("{error:?}"))
         .and_then(|signal| {
@@ -327,7 +327,7 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
                     "energy-translator: no watch on {}: {error}; Flow's turn ends are not held",
                     socket.display()
                 );
-                let _ = send(&mut daemon, Outcome::Down);
+                let _ = send(&mut daemon, EmissionOutput::Down);
             }
         }
     }
@@ -357,7 +357,7 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
                             "energy-translator: the watch on {} is lost; Flow's turn ends end",
                             self.watch.socket().display()
                         );
-                        let _ = send(&mut self.daemon, Outcome::Down);
+                        let _ = send(&mut self.daemon, EmissionOutput::Down);
                         return;
                     }
                 },
@@ -442,9 +442,9 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
             }
             let outcome = match flow.read_flow_frame() {
                 Ok(frame) => turn_end_outcome(&frame),
-                Err(_) => Outcome::Down,
+                Err(_) => EmissionOutput::Down,
             };
-            if matches!(outcome, Outcome::Down) {
+            if matches!(outcome, EmissionOutput::Down) {
                 return Forwarded::FlowClosed;
             }
             if send(&mut self.daemon, outcome).is_err() {
@@ -462,7 +462,6 @@ mod tests {
     //! accepted connection, a frame) and bounded by EVENT_WAIT.
     use super::*;
     use crate::FlowFraming;
-    use energy_nexus_emission::Response as EmissionResponse;
     use energy_nexus_wire::{PlacedSocket, PlacesSocket};
     use signal::{Restorable, Signal};
     use std::io::ErrorKind;
@@ -647,12 +646,10 @@ mod tests {
             .to_vec()
     }
 
-    fn outcome(daemon: &mut UnixStream) -> Outcome {
-        let EmissionResponse::Emitted(outcome) =
-            Signal::<EmissionResponse>::from(daemon.read_frame().unwrap())
-                .restore()
-                .unwrap();
-        outcome
+    fn outcome(daemon: &mut UnixStream) -> EmissionOutput {
+        Signal::<EmissionOutput>::from(daemon.read_frame().unwrap())
+            .restore()
+            .unwrap()
     }
 
     #[test]
@@ -697,7 +694,7 @@ mod tests {
             signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
         peer.write_flow_frame(&opening(100)).unwrap();
-        assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 100));
+        assert!(matches!(outcome(&mut daemon), EmissionOutput::TurnEndsObserved(ends) if ends[0].at.0.0 == 100));
 
         // Flow goes: it closes the subscription and removes its socket. The
         // daemon hears nothing of it, and nothing is attempted.
@@ -717,7 +714,7 @@ mod tests {
             signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
         peer.write_flow_frame(&opening(200)).unwrap();
-        assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 200));
+        assert!(matches!(outcome(&mut daemon), EmissionOutput::TurnEndsObserved(ends) if ends[0].at.0.0 == 200));
         // A turn end on the new subscription is relayed as before.
         let ended = signal_flow::Output::TurnEnded(signal_flow::TurnEnd {
             address: signal_flow::Address {
@@ -731,7 +728,7 @@ mod tests {
         });
         peer.write_flow_frame(&rkyv::to_bytes::<rkyv::rancor::Error>(&ended).unwrap())
             .unwrap();
-        assert!(matches!(outcome(&mut daemon), Outcome::TurnEnded(end) if end.at.0 == 201));
+        assert!(matches!(outcome(&mut daemon), EmissionOutput::TurnEnded(end) if end.at.0.0 == 201));
 
         // The daemon goes: the relay closes Flow's connection and ends.
         drop(daemon);
@@ -772,7 +769,7 @@ mod tests {
         drop(peer);
         drop(listener);
         std::fs::remove_dir_all(&runtime).unwrap();
-        assert_eq!(outcome(&mut daemon), Outcome::Down);
+        assert_eq!(outcome(&mut daemon), EmissionOutput::Down);
         relay.join().unwrap();
         assert!(attempts.try_recv().is_err(), "no attempt after the first");
     }
@@ -930,7 +927,7 @@ mod tests {
             signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
         peer.write_flow_frame(&opening(300)).unwrap();
-        assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 300));
+        assert!(matches!(outcome(&mut daemon), EmissionOutput::TurnEndsObserved(ends) if ends[0].at.0.0 == 300));
         drop(daemon);
         peer.set_read_timeout(Some(EVENT_WAIT)).unwrap();
         let mut closed = Vec::new();
