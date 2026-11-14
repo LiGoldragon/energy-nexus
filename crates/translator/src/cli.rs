@@ -6,25 +6,16 @@
 //! `energy-nexus-meta` and `energy-pace`, reads the same file; no place is
 //! ever typed. A configuration that is missing, cannot be read or names no
 //! place is a typed refusal naming the file, and the CLI reaches nothing.
+//!
+//! `CliConfiguration` and `ConfigurationRefusal` are generated from
+//! `ethos/cli.ethos`, a Library of the translator's.
 use datom_codec::{Actualizing, Datomizable, Potential};
-use energy_nexus_wire::{Place, PlaceName};
+pub use crate::generated::cli::{
+    CliConfiguration, ConfigurationPath, ConfigurationRefusal, PlaceName, Reason, RefusedFile,
+};
+use energy_nexus_wire::Place;
 use std::ffi::OsStr;
 use std::path::PathBuf;
-
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq)]
-pub struct CliConfiguration {
-    pub place_name: String,
-}
-
-/// Why a CLI reaches nothing: its configuration could not be found or read.
-#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, PartialEq, Eq)]
-pub enum ConfigurationRefusal {
-    /// Neither XDG_CONFIG_HOME nor HOME gives an absolute directory.
-    Unlocated(String),
-    Missing(String),
-    Unreadable { path: String, reason: String },
-    Invalid { path: String, reason: String },
-}
 
 impl std::fmt::Display for ConfigurationRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -92,10 +83,10 @@ impl ConfigurationFile {
                 return Err(ConfigurationRefusal::Missing(path))
             }
             Err(error) => {
-                return Err(ConfigurationRefusal::Unreadable {
-                    path,
-                    reason: error.to_string(),
-                })
+                return Err(ConfigurationRefusal::Unreadable(RefusedFile {
+                    configuration_path: ConfigurationPath(path),
+                    reason: Reason(error.to_string()),
+                }))
             }
         };
         let mut budget = datom_codec::Budget {
@@ -106,16 +97,18 @@ impl ConfigurationFile {
         };
         let configuration = Potential::<CliConfiguration>::from(source.trim())
             .actualize(&mut budget)
-            .map_err(|error| ConfigurationRefusal::Invalid {
-                path: path.clone(),
-                reason: format!("{error:?}"),
+            .map_err(|error| {
+                ConfigurationRefusal::Invalid(RefusedFile {
+                    configuration_path: ConfigurationPath(path.clone()),
+                    reason: Reason(format!("{error:?}")),
+                })
             })?;
-        let name = &configuration.place_name;
+        let name = &configuration.place_name.0;
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
-            return Err(ConfigurationRefusal::Invalid {
-                path,
-                reason: format!("{name:?} is not a place name"),
-            });
+            return Err(ConfigurationRefusal::Invalid(RefusedFile {
+                configuration_path: ConfigurationPath(path),
+                reason: Reason(format!("{name:?} is not a place name")),
+            }));
         }
         Ok(configuration)
     }
@@ -132,13 +125,13 @@ impl ConfiguredPlace for Place {
         let configuration = ConfigurationFile::of_process()
             .and_then(|file| file.read())
             .map_err(|refusal| refusal.to_string())?;
-        Place::resolve(PlaceName(configuration.place_name))
+        Place::resolve(energy_nexus_wire::PlaceName(configuration.place_name.0))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CliConfiguration, ConfigurationFile, ConfigurationRefusal};
+    use super::{CliConfiguration, ConfigurationFile, ConfigurationRefusal, PlaceName};
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -185,13 +178,13 @@ mod tests {
         assert_eq!(
             file.read(),
             Ok(CliConfiguration {
-                place_name: "main".into()
+                place_name: PlaceName("main".into())
             })
         );
         for invalid in ["{ main next }", "{ «..» }", "{ }", ""] {
             std::fs::write(&file.path, invalid).unwrap();
             assert!(
-                matches!(file.read(), Err(ConfigurationRefusal::Invalid { path: named, .. }) if named == path),
+                matches!(file.read(), Err(ConfigurationRefusal::Invalid(refused)) if refused.configuration_path.0 == path),
                 "{invalid:?}: {:?}",
                 file.read()
             );
@@ -200,7 +193,7 @@ mod tests {
         std::fs::create_dir(&file.path).unwrap();
         assert!(matches!(
             file.read(),
-            Err(ConfigurationRefusal::Unreadable { path: named, .. }) if named == path
+            Err(ConfigurationRefusal::Unreadable(refused)) if refused.configuration_path.0 == path
         ));
     }
 }

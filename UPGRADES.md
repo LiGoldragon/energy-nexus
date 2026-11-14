@@ -10,7 +10,9 @@ No Energy wire or memory change. Repins signal-energy-nexus to `e0eb9b7` and met
 
 **Memory generated.** `ethos/memory.ethos` declares the stored root `Memory.{ Vector<Latest> History Configuration }` and generates `crates/core/src/generated/memory.rs`; the hand `Memory`, `Latest` and `Configuration` are gone. `Configuration`'s defaults are `impl Default`, its rules `impl Validating`, on the generated type. Fields follow the Ethos: `latest_vector`, `history: History`, `threshold_vector`, `reminder_vector`, `redeem_expiring: RedeemExpiring`, `redeem_used_at_least: RedeemUsedAtLeast`, `targets: Targets`, `window_targets: WindowTargets`. The bytes are the hand layout's (`tests/memory_hand_and_generated.rs`); `energy.rkyv` stays format version 2. The envelope and the frozen `unversioned` and `version1` layouts stay hand-written. `Answer`, which nothing used, is gone from the Ethos.
 
-**Still hand-written here** (later steps): the emission contract of `crates/emission`, and the translator's `Programs`.
+**The translator's Memory and the CLI configuration generated.** `ethos/programs.ethos`, the translator's own Memory root, generates `Programs.{ CodexProgram FlowProgram ClaudeCredentials }` (each an `Option<String>` newtype; `impl Default` by hand), and `ethos/cli.ethos`, a Library, generates `CliConfiguration.{ PlaceName }` and `ConfigurationRefusal` (its `Unreadable` and `Invalid` carry one named `RefusedFile.{ ConfigurationPath Reason }`), both into `crates/translator/src/generated/`, checked by the translator's `build.rs`. `energy-translator.rkyv` stays format version 1, byte for byte, and the configuration datom and every refusal print as before (`crates/translator/tests/hand_and_generated.rs`).
+
+**Still hand-written here** (later steps): the emission contract of `crates/emission`.
 
 ## 0.3.3 — signal-flow 63: Input and Output
 

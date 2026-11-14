@@ -3,6 +3,12 @@ name="energy-nexus-translator"
 version = "0.3.3"
 edition.workspace=true
 rust-version.workspace=true
+build = "build.rs"
+
+[features]
+# The generated records' datom derives: the translator speaks datom always.
+default = ["datom"]
+datom = []
 
 [dependencies]
 energy-nexus-emission={path="../emission"}
@@ -19,6 +25,9 @@ time={version="0.3",features=["parsing"]}
 tempfile="3"
 nix={version="0.30",features=["socket","signal","inotify","event"]}
 rkyv.workspace=true
+
+[build-dependencies]
+ethos-zero={git="https://github.com/LiGoldragon/ethos-zero",rev="970459d"}
 
 [dev-dependencies]
 nix={version="0.30",features=["socket","signal"]}

@@ -1,0 +1,5 @@
+Memory
+[]
+[ Programs.{ CodexProgram.Option<String>                  ; the stored root of energy-translator.rkyv, format version 1
+             FlowProgram.Option<String>                   ; the Flow Nexus client the reminder is sent through
+             ClaudeCredentials.Option<String> } ]         ; the Claude credentials file the usage is read with

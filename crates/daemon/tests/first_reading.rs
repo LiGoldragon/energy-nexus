@@ -150,7 +150,7 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
     let translator = Translator {
         place: place.clone(),
         programs: Arc::new(Mutex::new(Programs {
-            codex: Some(codex.to_str().unwrap().into()),
+            codex_program: energy_nexus_translator::CodexProgram(Some(codex.to_str().unwrap().into())),
             ..Programs::default()
         })),
         greeting_wait: energy_nexus_translator::flow::GreetingWait::default(),

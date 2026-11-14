@@ -172,7 +172,7 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
     let translator = Translator {
         place: place.clone(),
         programs: Arc::new(Mutex::new(Programs {
-            codex: Some(codex.to_str().unwrap().into()),
+            codex_program: energy_nexus_translator::CodexProgram(Some(codex.to_str().unwrap().into())),
             ..Programs::default()
         })),
         greeting_wait: energy_nexus_translator::flow::GreetingWait::default(),

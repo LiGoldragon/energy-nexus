@@ -168,7 +168,7 @@ const PROOF_OF_CONCEPT_MEMORY: &[u8] =
 
 #[test]
 fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured() {
-    use energy_nexus_translator::Programs;
+    use energy_nexus_translator::{ClaudeCredentials, CodexProgram, FlowProgram, Programs};
     use energy_nexus_wire::{Admission, Framing, MemoryPathing, Persisted};
     let shared = SharedPlace::declared();
     // activation-places.md step 3: translator.rkyv moved to <State>/energy-translator.rkyv
@@ -183,11 +183,11 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
     assert_eq!(
         read(),
         Programs {
-            codex: Some(
+            codex_program: CodexProgram(Some(
                 "/nix/store/1q41fx3vb1hqzdgkr0nk5b0pc4jvyhl1-codex-0.166.0/bin/codex".into()
-            ),
-            flow: Some("/home/li/.local/bin/flow-0.51".into()),
-            credentials: Some("/home/li/.claude/.credentials.json".into()),
+            )),
+            flow_program: FlowProgram(Some("/home/li/.local/bin/flow-0.51".into())),
+            claude_credentials: ClaudeCredentials(Some("/home/li/.claude/.credentials.json".into())),
         }
     );
     // activation-places.md step 6, as energy-nexus-meta sends it
@@ -210,7 +210,10 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_configured()
         .protosize()
         .textualize();
     assert_eq!(answer, configured);
-    assert_eq!(read().flow.as_deref(), Some("/home/li/.local/bin/flow-nexus"));
+    assert_eq!(
+        read().flow_program.0.as_deref(),
+        Some("/home/li/.local/bin/flow-nexus")
+    );
     assert!(running.stop().success());
 }
 

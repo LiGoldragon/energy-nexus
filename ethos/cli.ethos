@@ -1,0 +1,10 @@
+Library
+[]
+[ CliConfiguration.{ PlaceName.String }                   ; the datom every Energy CLI reads, its place first
+  RefusedFile.{ ConfigurationPath.String Reason.String }  ; the configuration file refused, and why
+  ConfigurationRefusal.[ Unlocated.String                 ; why a CLI reaches nothing
+                         Missing.String
+                         Unreadable.RefusedFile
+                         Invalid.RefusedFile ] ]
+[]
+[]
