@@ -1,5 +1,21 @@
 # Upgrades
 
+## 0.4.0 — pace in useful hours; the usefulness schedule
+
+All five packages move to 0.4.0. Branch-only (schedule-pace); the vision is energy-nexus-v1, "Pace: over or under, per day" (psyche-belief 90b5bf1, 09947be, d0b875d).
+
+**Pins.** signal-energy-nexus 0.6.0 (`d7d9f8d`) and meta-signal-energy-nexus 0.6.0 (`dd6ec2b`): `Pace` carries `hours_left`, `useful_left` and `per_useful_hour` where it carried `per_day`, and `Set` carries `Span`, `RemoveSpan`, `Override`, `RemoveOverride` and `Baseline`. Both contract digests move: a 0.3.x client is refused at the greeting, so the daemon, the translator and the text clients deploy together. jiff 0.2 in the core, for the owner's time zone; the daemon's closure stays free of Datom, Protos and JSON.
+
+**Useful hours.** `Pacing::pace` takes the time zone the owner's hours are read in; the daemon passes the system's (`TimeZone::system()`: `TZ`, else `/etc/localtime`). Time is weighed exactly, in percent-seconds, segment by segment between local hour boundaries and override edges (`UsefulTime`). Expected is the useful time spent from the window's start over the useful time from its start to the target's end (the reset for `Even`, the instant for `SpendBy`), rounded half up; a window with no useful time at all counts time plainly. `hours_left` is the wall-clock hours to the target's end, rounded; `useful_left` is the useful hours from the reading to that end, to a tenth; `per_useful_hour` is the percent left over the unrounded useful hours left, to a hundredth, and the whole percent left when no useful hour is left. With no schedule the baseline is 100 and pace reads as 0.3.x did.
+
+**The schedule.** `Configure.Span` adds one span, its days kept in week order and each once; an equal span is not added twice, and `RemoveSpan` removes the equal one. A span's hours are 0 to 23 and differ; To before From runs past midnight into the next day. `Override` adds one stretch, From before To; `RemoveOverride` removes it. `Baseline` sets the usefulness of every hour nothing names. Every usefulness is 0 to 100. Where spans overlap the one naming fewer days counts, then fewer hours, then the later configured; an override counts over every span, the shorter of two overlapping overrides first, then the later configured.
+
+**Memory: format version 3.** `energy.rkyv` is written at format version 3, whose configuration holds `schedule`, `overrides` and `baseline`. Version 2 (0.3.0 to 0.3.2) is upgraded on open with everything carried and the schedule empty at baseline 100; version 1 and the archive written before the envelope are upgraded as before, to version 3. The schedule's rules are checked on every read and before every write. The translator's file is unchanged.
+
+**energy-pace** prints the hours left, the useful hours left and the percent per useful hour in place of the daily share.
+
+**Tests.** `crates/core/tests/useful_hours.rs` holds the module's worked examples: his Codex week (Baseline 20, every day 8 to 22 at 100, 35% used at 13 November 16:50) reads `Even 25 35 Over 124 83.5 0.78`; the weekend keeper, the evening job, the gradient and the dentist's afternoon read hour by hour as the module says; the more specific span counts, an override counts over every span, a span may run past midnight, and the hours follow daylight saving. `memory_admission.rs` upgrades a format version 2 file and keeps a schedule across a restart.
+
 ## 0.3.2 — signal-flow 61 and the Signal greeting
 
 All five packages move to 0.3.2. No Energy contract or memory change. Branch-only preparation: it is the Energy side of the Flow 0.54.7 rollout and is deployed with it, in the same Home generation.
