@@ -1,9 +1,13 @@
 use energy_nexus_wire::{Earlier, Envelope, Persisted, Upgrade};
 use meta_signal_energy_nexus::{ProviderTarget, Set, WindowTarget};
 use signal_energy_nexus::{
-    Instant, Level, Minutes, Pace, Percent, Provider, Reading, Reminder, Reset, ResetStatus,
-    Standing, Target, Threshold,
+    Baseline, Hours, Instant, Level, Minutes, Override, Pace, Percent, Provider, Reading,
+    Reminder, Reset, ResetStatus, Span, Standing, Target, Threshold,
 };
+
+mod usefulness;
+pub use jiff::tz::TimeZone;
+pub use usefulness::{ScheduleChecking, SpanReading, UsefulTime};
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Latest {
@@ -19,6 +23,12 @@ pub struct Configuration {
     pub redeem_used_at_least: Percent,
     pub targets: Vec<ProviderTarget>,
     pub window_targets: Vec<WindowTarget>,
+    /// The usefulness of the hours of the week, span by span.
+    pub schedule: Vec<Span>,
+    /// Stretches of time whose usefulness is set over the schedule.
+    pub overrides: Vec<Override>,
+    /// The usefulness of an hour no span names.
+    pub baseline: Baseline,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -51,6 +61,9 @@ impl Default for Configuration {
                 },
             ],
             window_targets: Vec::new(),
+            schedule: Vec::new(),
+            overrides: Vec::new(),
+            baseline: Baseline(Percent(100)),
         }
     }
 }
@@ -78,19 +91,25 @@ impl Configuration {
                 );
             }
         }
-        Ok(())
+        for span in &self.schedule {
+            span.check()?;
+        }
+        for stretch in &self.overrides {
+            stretch.check()?;
+        }
+        self.baseline.check()
     }
 }
 
-/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 2 has
-/// no polling interval: Energy reads a provider on events. Version 1 and the
-/// archive written before the envelope are upgraded on open.
+/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 3 holds
+/// the usefulness schedule: spans, overrides and a baseline. Versions 2 and
+/// 1 and the archive written before the envelope are upgraded on open.
 impl Persisted for Memory {
     const ENVELOPE: Envelope = Envelope {
         magic: *b"ENXMEMRY",
-        version: 2,
+        version: 3,
     };
-    const EARLIER_VERSIONS: &'static [u32] = &[1];
+    const EARLIER_VERSIONS: &'static [u32] = &[1, 2];
     type Uncarried = unversioned::Reminder;
     fn from_archive(archive: &[u8]) -> Result<Self, String> {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
@@ -104,6 +123,11 @@ impl Persisted for Memory {
             }
             Earlier::Version(1) => {
                 rkyv::from_bytes::<version1::Memory, rkyv::rancor::Error>(archive)
+                    .map(Upgrade::from)
+                    .map_err(|error| error.to_string())
+            }
+            Earlier::Version(2) => {
+                rkyv::from_bytes::<version2::Memory, rkyv::rancor::Error>(archive)
                     .map(Upgrade::from)
                     .map_err(|error| error.to_string())
             }
@@ -202,6 +226,7 @@ pub mod unversioned {
                         redeem_used_at_least: configuration.redeem_used_at_least,
                         targets: configuration.targets,
                         window_targets: configuration.window_targets,
+                        ..super::Configuration::default()
                     },
                 },
                 uncarried: configuration.reminders,
@@ -210,8 +235,9 @@ pub mod unversioned {
     }
 }
 /// The layout of format version 1, written by energy-nexus 0.2.0 (4e4742e):
-/// the current layout and a polling interval. The interval is dropped on
-/// upgrade, since Energy reads on events; everything else is carried.
+/// the version 2 layout and a polling interval. The interval is dropped on
+/// upgrade, since Energy reads on events; everything else is carried, and the
+/// schedule begins empty, every hour at the default baseline.
 pub mod version1 {
     use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
     use signal_energy_nexus::{Minutes, Percent, Reading, Reminder, Threshold};
@@ -246,6 +272,52 @@ pub mod version1 {
                         redeem_used_at_least: configuration.redeem_used_at_least,
                         targets: configuration.targets,
                         window_targets: configuration.window_targets,
+                        ..super::Configuration::default()
+                    },
+                },
+                uncarried: Vec::new(),
+            }
+        }
+    }
+}
+/// The layout of format version 2, written by energy-nexus 0.3.0 to 0.3.2
+/// (cd4c85c): the current layout without the usefulness schedule. Everything
+/// is carried; the schedule begins empty, with no override, and every hour
+/// counts at the default baseline, 100, so pace reads as it did.
+pub mod version2 {
+    use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
+    use signal_energy_nexus::{Minutes, Percent, Reading, Reminder, Threshold};
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+    pub struct Memory {
+        pub latest: Vec<super::Latest>,
+        pub history: Vec<Reading>,
+        pub configuration: Configuration,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug)]
+    pub struct Configuration {
+        pub thresholds: Vec<Threshold>,
+        pub reminders: Vec<Reminder>,
+        pub redeem_expiring: Minutes,
+        pub redeem_used_at_least: Percent,
+        pub targets: Vec<ProviderTarget>,
+        pub window_targets: Vec<WindowTarget>,
+    }
+    impl From<Memory> for super::Upgrade<super::Memory> {
+        fn from(old: Memory) -> Self {
+            let configuration = old.configuration;
+            Self {
+                memory: super::Memory {
+                    latest: old.latest,
+                    history: old.history,
+                    configuration: super::Configuration {
+                        thresholds: configuration.thresholds,
+                        reminders: configuration.reminders,
+                        redeem_expiring: configuration.redeem_expiring,
+                        redeem_used_at_least: configuration.redeem_used_at_least,
+                        targets: configuration.targets,
+                        window_targets: configuration.window_targets,
+                        ..super::Configuration::default()
                     },
                 },
                 uncarried: Vec::new(),
@@ -265,11 +337,16 @@ pub enum RedeemDecision {
     NoReset,
 }
 
+/// Pace counts time in useful hours: each hour of a window at the
+/// usefulness its owner gave it (vision energy-nexus-v1, "Pace").
 pub trait Pacing {
-    fn pace(&self, configuration: &Configuration) -> Vec<Pace>;
+    /// Each window's pace at the reading's instant, the owner's hours read
+    /// in `zone`.
+    fn pace(&self, configuration: &Configuration, zone: &TimeZone) -> Vec<Pace>;
 }
 impl Pacing for Reading {
-    fn pace(&self, configuration: &Configuration) -> Vec<Pace> {
+    fn pace(&self, configuration: &Configuration, zone: &TimeZone) -> Vec<Pace> {
+        let useful = UsefulTime::new(configuration, zone);
         self.window_vector
             .iter()
             .map(|window| {
@@ -294,15 +371,21 @@ impl Pacing for Reading {
                     Target::Even => window.resets.0,
                     Target::SpendBy(instant) => instant.0,
                 };
-                let span = (deadline - start).max(1);
-                let elapsed = (self.at.0 - start).clamp(0, span);
-                let expected = ((elapsed * 100 + span / 2) / span).clamp(0, 100);
-                let seconds_left = (deadline - self.at.0).max(1);
-                let per_day = if used >= 100 || deadline <= self.at.0 {
-                    0
-                } else {
-                    (((100 - used) * 86_400 + seconds_left / 2) / seconds_left).max(1)
-                };
+                let now = self.at.0.clamp(start.min(deadline), deadline.max(start));
+                let spent = useful.weight(start, now);
+                let left = useful.weight(now, deadline);
+                let expected = match spent + left {
+                    0 => {
+                        // No useful time in the whole window: time counts plainly.
+                        let whole = (deadline - start).max(0);
+                        let elapsed = i128::from((self.at.0 - start).clamp(0, whole));
+                        let whole = i128::from(whole.max(1));
+                        (elapsed * 100 + whole / 2) / whole
+                    }
+                    whole => (spent * 100 + whole / 2) / whole,
+                } as i64;
+                let expected = expected.clamp(0, 100);
+                let seconds_left = (deadline - self.at.0).max(0);
                 Pace {
                     provider: self.provider.clone(),
                     name: window.name.clone(),
@@ -314,7 +397,9 @@ impl Pacing for Reading {
                         std::cmp::Ordering::Less => Standing::Under,
                         std::cmp::Ordering::Equal => Standing::On,
                     },
-                    per_day: Percent(per_day),
+                    hours_left: Hours((seconds_left + 1_800) / 3_600),
+                    useful_left: UsefulTime::hours(left),
+                    per_useful_hour: UsefulTime::per_useful_hour(100 - used, left),
                 }
             })
             .collect()
@@ -414,8 +499,16 @@ impl Configuring for Memory {
                         .into(),
                 )
             }
+            Set::Span(span) | Set::RemoveSpan(span) => span.check()?,
+            Set::Override(stretch) | Set::RemoveOverride(stretch) => stretch.check()?,
+            Set::Baseline(baseline) => baseline.check()?,
             _ => {}
         }
+        let set = match set {
+            Set::Span(span) => Set::Span(span.normalized()),
+            Set::RemoveSpan(span) => Set::RemoveSpan(span.normalized()),
+            other => other,
+        };
         match set.clone() {
             Set::Threshold(value) => {
                 self.configuration
@@ -445,6 +538,21 @@ impl Configuring for Memory {
                     .retain(|known| known.provider != value.provider || known.name != value.name);
                 self.configuration.window_targets.push(value)
             }
+            Set::Span(value) => {
+                if !self.configuration.schedule.contains(&value) {
+                    self.configuration.schedule.push(value)
+                }
+            }
+            Set::RemoveSpan(value) => self.configuration.schedule.retain(|known| known != &value),
+            Set::Override(value) => {
+                if !self.configuration.overrides.contains(&value) {
+                    self.configuration.overrides.push(value)
+                }
+            }
+            Set::RemoveOverride(value) => {
+                self.configuration.overrides.retain(|known| known != &value)
+            }
+            Set::Baseline(value) => self.configuration.baseline = value,
             Set::Program(_) | Set::Credentials(_) => {
                 return Err("translator configuration belongs to the translator".into())
             }
@@ -584,7 +692,7 @@ mod tests {
             provider: Provider::Codex,
             target: Target::SpendBy(Instant(170)),
         }];
-        let pace = value.pace(&configuration).remove(0);
+        let pace = value.pace(&configuration, &TimeZone::UTC).remove(0);
         assert_eq!(pace.used, Percent(92));
         assert_eq!(pace.standing, Standing::Over);
         assert!(pace.expected.0 < pace.used.0);
@@ -625,7 +733,7 @@ mod tests {
             name: Name::FableWeek,
             target: Target::SpendBy(Instant(220)),
         }];
-        let pace = value.pace(&configuration);
+        let pace = value.pace(&configuration, &TimeZone::UTC);
         assert_eq!(pace.len(), 2);
         assert_eq!(pace[0].name, Name::Week);
         assert_eq!(pace[0].target, Target::Even);
@@ -688,11 +796,23 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("energy-rules-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
-        for broken in 0..3 {
+        for broken in 0..6 {
             let mut memory = Memory::default();
             match broken {
                 0 => memory.configuration.redeem_expiring = Minutes(0),
                 1 => memory.configuration.redeem_used_at_least = Percent(101),
+                2 => memory.configuration.baseline = Baseline(Percent(101)),
+                3 => memory.configuration.schedule.push(Span {
+                    weekday_vector: Vec::new(),
+                    from: signal_energy_nexus::Hour(8),
+                    to: signal_energy_nexus::Hour(22),
+                    usefulness: signal_energy_nexus::Usefulness(Percent(100)),
+                }),
+                4 => memory.configuration.overrides.push(Override {
+                    from: Instant(20),
+                    to: Instant(10),
+                    usefulness: signal_energy_nexus::Usefulness(Percent(0)),
+                }),
                 _ => memory.configuration.thresholds.push(Threshold {
                     level: Level::Out,
                     left: Percent(10),

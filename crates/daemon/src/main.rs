@@ -2,7 +2,7 @@ mod schedule;
 
 use energy_nexus_core::{
     Configuring, LevelChange, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering,
-    Reminding,
+    Reminding, TimeZone,
 };
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumed, Emission, Idempotency,
@@ -144,7 +144,9 @@ impl Answering for Nexus {
     fn recall(&self, provider: Provider) -> Response {
         match self.memory.latest(&provider) {
             Some(latest) => Response::Read(Read_Data {
-                pace_vector: latest.reading.pace(self.memory.configuration()),
+                pace_vector: latest
+                    .reading
+                    .pace(self.memory.configuration(), &TimeZone::system()),
                 reading: latest.reading.clone(),
             }),
             None => Response::Refused(Refused::ProviderDown(provider)),
@@ -171,7 +173,7 @@ impl Answering for Nexus {
                         let _ = self.attempt(Operation::Reminding(reminder, reading.clone()));
                     }
                 }
-                let pace_vector = reading.pace(self.memory.configuration());
+                let pace_vector = reading.pace(self.memory.configuration(), &TimeZone::system());
                 Response::Read(Read_Data {
                     reading,
                     pace_vector,

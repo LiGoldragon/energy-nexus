@@ -1,6 +1,6 @@
 Memory
-[ energy:[ Provider Reading Level Threshold Reminder Minutes Percent ProviderTarget WindowTarget ] ] ; imports Energy Nexus vocabulary
+[ energy:[ Provider Reading Level Threshold Reminder Minutes Percent ProviderTarget WindowTarget Span Override Baseline ] ] ; imports Energy Nexus vocabulary
 [ Latest.{ Provider Reading Level }                        ; the latest observation and level for one provider
   History.Vector<Reading>
-  Configuration.{ Vector<Threshold> Vector<Reminder> RedeemExpiring.Minutes RedeemUsedAtLeast.Percent Targets.Vector<ProviderTarget> WindowTargets.Vector<WindowTarget> } ; the Nexus policy state
+  Configuration.{ Vector<Threshold> Vector<Reminder> RedeemExpiring.Minutes RedeemUsedAtLeast.Percent Targets.Vector<ProviderTarget> WindowTargets.Vector<WindowTarget> Schedule.Vector<Span> Vector<Override> Baseline } ; the Nexus policy state
   Answer.[ Succeeded Failed.String ] ]                     ; the memory change result

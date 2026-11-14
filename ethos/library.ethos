@@ -6,7 +6,13 @@ Library
   Minutes.Integer
   Used.Percent
   Expected.Percent
-  PerDay.Percent
+  Hours.Integer
+  Hour.Integer                                             ; 0 to 23, in the owner's local time
+  Weekday.[ Monday Tuesday Wednesday Thursday Friday Saturday Sunday ]
+  Usefulness.Percent                                       ; what an hour counts for; 100 is an hour at full use
+  Baseline.Percent                                         ; the usefulness of an hour no span names
+  Span.{ Vector<Weekday> From.Hour To.Hour Usefulness }    ; on these days, between these hours, an hour counts this much
+  Override.{ Since.Instant Until.Instant Usefulness }      ; between these two instants, whatever the schedule says; From and To name the span's hours
   Window.{ Name.[ Session Week FableWeek ] Used Resets.Instant Duration.Minutes } ; one provider rate-limit window
   ResetId.String
   ResetStatus.[ Available Redeeming Redeemed ]             ; the provider's reset-credit state
@@ -19,6 +25,9 @@ Library
   Target.[ Even SpendBy.Instant ]                          ; how usage is intended to be spent
   ProviderTarget.{ Provider Target }                       ; one provider's pace target
   WindowTarget.{ Provider Name Target }                    ; one window's pace target override
-  Pace.{ Provider Name Target Expected Used Standing.[ Over Under On ] PerDay } ] ; actual usage against its target
+  Pace.{ Provider Name Target Expected Used Standing.[ Over Under On ] ; actual usage against its target, time in useful hours
+         HoursLeft.Hours                                   ; the hours left in the window
+         UsefulLeft.Decimal                                ; those hours, each counted at its usefulness
+         PerUsefulHour.Decimal } ]                         ; percent left per useful hour left
 []                                                         ; traits
 []                                                         ; associations
