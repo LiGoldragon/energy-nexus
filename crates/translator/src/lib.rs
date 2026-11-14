@@ -990,8 +990,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _program = FIXTURE_PROGRAM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
-        let log = directory.path().join("flow-nexus.log");
-        let program = directory.path().join("flow-nexus");
+        let log = directory.path().join("flow.log");
+        let program = directory.path().join("flow");
         std::fs::write(
             &program,
             format!(
@@ -1038,8 +1038,8 @@ printf '%s\n' "$1" > {}
         use std::os::unix::fs::PermissionsExt;
         let _program = FIXTURE_PROGRAM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
-        let log = directory.path().join("flow-nexus.log");
-        let program = directory.path().join("flow-nexus");
+        let log = directory.path().join("flow.log");
+        let program = directory.path().join("flow");
         std::fs::write(
             &program,
             format!(
@@ -1204,7 +1204,7 @@ sleep 60
         meta_signal_energy_nexus::Input::Configure(meta_signal_energy_nexus::Set::Program(
             meta_signal_energy_nexus::Program_Data {
                 program: meta_signal_energy_nexus::Program::Flow,
-                path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow-nexus".into()),
+                path: meta_signal_energy_nexus::Path("/home/li/.local/bin/flow".into()),
             },
         ))
     }
@@ -1228,11 +1228,11 @@ sleep 60
             reminder_query()
         );
         assert_eq!(
-            typed("Configure.Program.{ Flow /home/li/.local/bin/flow-nexus }").unwrap(),
+            typed("Configure.Program.{ Flow /home/li/.local/bin/flow }").unwrap(),
             program_query()
         );
         assert!(
-            typed("Configure.Program.{ Flow { /home/li/.local/bin/flow-nexus } }").is_err(),
+            typed("Configure.Program.{ Flow { /home/li/.local/bin/flow } }").is_err(),
             "the braced path of protos 0.32 no longer reads"
         );
     }

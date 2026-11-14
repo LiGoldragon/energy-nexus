@@ -62,12 +62,12 @@ fn programs_archive_as_the_hand_programs_both_ways() {
         (
             HandPrograms {
                 codex: Some("c".into()),
-                flow: Some("/home/li/.local/bin/flow-nexus".into()),
+                flow: Some("/home/li/.local/bin/flow".into()),
                 credentials: None,
             },
             Programs {
                 codex_program: CodexProgram(Some("c".into())),
-                flow_program: FlowProgram(Some("/home/li/.local/bin/flow-nexus".into())),
+                flow_program: FlowProgram(Some("/home/li/.local/bin/flow".into())),
                 claude_credentials: ClaudeCredentials(None),
             },
         ),
