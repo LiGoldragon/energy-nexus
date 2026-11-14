@@ -11,7 +11,7 @@
 //! before Flow is first looked for, so a socket made at any later moment is
 //! an event, and every connection attempt after the first follows one.
 //!
-//! Every subscription greets first, as signal-flow 61 requires of an
+//! Every subscription greets first, as signal-flow requires of an
 //! ordinary connection: the translator writes signal-flow's `Handshake`,
 //! reads the receipt, and writes its query only on `Greeted` naming the
 //! digest of the contract it was built with. Any other answer is a typed
@@ -100,7 +100,7 @@ pub enum SubscriptionFailure {
     /// read on it.
     Transport(std::io::Error),
     /// Flow answered the greeting with `GreetingRefused`: its contract is
-    /// not signal-flow 61's. The rejection carries Flow's own digest.
+    /// not signal-flow 63's. The rejection carries Flow's own digest.
     GreetingRefused(signal_flow::HandshakeRejection),
     /// Flow answered `Greeted` naming a contract other than this
     /// translator's.
@@ -148,7 +148,7 @@ pub trait GreetsFlowNexus {
 }
 impl GreetsFlowNexus for UnixStream {
     fn greet_flow(&mut self, wait: GreetingWait) -> Result<(), SubscriptionFailure> {
-        let greeting = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::greeting())
+        let greeting = rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::greeting())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         self.write_flow_frame(&greeting)?;
         self.set_read_timeout(Some(wait.duration()))?;
@@ -167,7 +167,7 @@ impl GreetsFlowNexus for UnixStream {
         self.set_read_timeout(None)?;
         match rkyv::from_bytes::<signal_flow::HandshakeReceipt, rkyv::rancor::Error>(&frame) {
             Ok(signal_flow::HandshakeReceipt::Greeted(digest))
-                if digest == signal_flow::Query::contract_digest() =>
+                if digest == signal_flow::Input::contract_digest() =>
             {
                 Ok(())
             }
@@ -187,14 +187,14 @@ impl GreetsFlowNexus for UnixStream {
 pub trait SubscribesToFlow: Send + 'static {
     fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure>;
 }
-/// The subscription as Flow 0.54.7 takes it (signal-flow 61): the greeting,
+/// The subscription as Flow 0.55.0 takes it (signal-flow 63): the greeting,
 /// whose receipt each read waits for `greeting_wait`, then `Observe.TurnEnds`.
 pub struct ObserveTurnEnds {
     pub greeting_wait: GreetingWait,
 }
 impl SubscribesToFlow for ObserveTurnEnds {
     fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure> {
-        let query = signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds);
+        let query = signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds);
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let mut flow = UnixStream::connect(socket)?;
@@ -530,7 +530,7 @@ mod tests {
         std::fs::remove_file(runtime.join("flow.sock.part")).unwrap();
     }
 
-    /// Flow, as signal-flow 61 plays it, reads the peer's greeting and
+    /// Flow, as signal-flow 63 plays it, reads the peer's greeting and
     /// answers `receipt` to it.
     fn greeted(
         peer: &mut UnixStream,
@@ -551,14 +551,14 @@ mod tests {
     /// for it; `accepted` waits for the connection and its query.
     fn accepting(
         listener: &UnixListener,
-    ) -> mpsc::Receiver<(UnixStream, signal_flow::Query)> {
+    ) -> mpsc::Receiver<(UnixStream, signal_flow::Input)> {
         let (taken, take) = mpsc::channel();
         let listener = listener.try_clone().unwrap();
         std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().unwrap();
-            let greeting = greeted(&mut peer, signal_flow::Query::receipt);
-            assert_eq!(greeting, signal_flow::Query::greeting());
-            let query = rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(
+            let greeting = greeted(&mut peer, signal_flow::Input::receipt);
+            assert_eq!(greeting, signal_flow::Input::greeting());
+            let query = rkyv::from_bytes::<signal_flow::Input, rkyv::rancor::Error>(
                 &peer.read_flow_frame().unwrap(),
             )
             .unwrap();
@@ -567,8 +567,8 @@ mod tests {
         take
     }
     fn accepted(
-        taking: mpsc::Receiver<(UnixStream, signal_flow::Query)>,
-    ) -> (UnixStream, signal_flow::Query) {
+        taking: mpsc::Receiver<(UnixStream, signal_flow::Input)>,
+    ) -> (UnixStream, signal_flow::Input) {
         taking.recv_timeout(EVENT_WAIT).expect("Flow takes a subscription")
     }
 
@@ -620,7 +620,7 @@ mod tests {
             if let Some(delay) = delay {
                 std::thread::sleep(delay);
                 let receipt =
-                    rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting))
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::receipt(&greeting))
                         .unwrap();
                 let _ = peer.write_flow_frame(&receipt);
             }
@@ -642,7 +642,7 @@ mod tests {
             flow_id: signal_flow::FlowId("ff3882".into()),
             observed_at: signal_flow::ObservedAt(at),
         };
-        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::TurnEndsObserved(vec![end]))
+        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Output::TurnEndsObserved(vec![end]))
             .unwrap()
             .to_vec()
     }
@@ -694,7 +694,7 @@ mod tests {
         let (mut peer, query) = accepted(taking);
         assert_eq!(
             query,
-            signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+            signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
         peer.write_flow_frame(&opening(100)).unwrap();
         assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 100));
@@ -714,12 +714,12 @@ mod tests {
         let (mut peer, query) = accepted(taking);
         assert_eq!(
             query,
-            signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+            signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
         peer.write_flow_frame(&opening(200)).unwrap();
         assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 200));
         // A turn end on the new subscription is relayed as before.
-        let ended = signal_flow::Response::TurnEnded(signal_flow::TurnEnd {
+        let ended = signal_flow::Output::TurnEnded(signal_flow::TurnEnd {
             address: signal_flow::Address {
                 aspect: signal_flow::Aspect::Mind,
                 topic: signal_flow::Topic("energyNexus".into()),
@@ -840,7 +840,7 @@ mod tests {
             "the configured wait ended it, not the default's thirty seconds"
         );
         // The failed subscription's connection is closed with nothing after
-        // the greeting: no Query was sent.
+        // the greeting: no Input was sent.
         assert!(
             rest.recv_timeout(EVENT_WAIT).expect("the connection ends").is_empty(),
             "nothing follows an unanswered greeting"
@@ -862,7 +862,7 @@ mod tests {
         ));
         assert!(rest.recv_timeout(EVENT_WAIT).unwrap().is_empty());
         // A wait longer than the same answer opens the subscription, and the
-        // Query follows the greeting.
+        // Input follows the greeting.
         let (taken, take) = mpsc::channel();
         let listening = listener.try_clone().unwrap();
         std::thread::spawn(move || {
@@ -873,10 +873,10 @@ mod tests {
             .unwrap();
             std::thread::sleep(delay);
             let receipt =
-                rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting))
+                rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::receipt(&greeting))
                     .unwrap();
             peer.write_flow_frame(&receipt).unwrap();
-            let query = rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(
+            let query = rkyv::from_bytes::<signal_flow::Input, rkyv::rancor::Error>(
                 &peer.read_flow_frame().unwrap(),
             )
             .unwrap();
@@ -887,7 +887,7 @@ mod tests {
         let (_peer, query) = accepted(take);
         assert_eq!(
             query,
-            signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+            signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
     }
 
@@ -927,7 +927,7 @@ mod tests {
         let (mut peer, query) = accepted(taking);
         assert_eq!(
             query,
-            signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+            signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
         );
         peer.write_flow_frame(&opening(300)).unwrap();
         assert!(matches!(outcome(&mut daemon), Outcome::TurnEndsObserved(ends) if ends[0].at.0 == 300));

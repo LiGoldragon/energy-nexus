@@ -44,7 +44,7 @@ fn write_flow_frame(stream: &mut UnixStream, bytes: &[u8]) {
     stream.write_all(bytes).unwrap();
 }
 
-/// Flow as signal-flow 61 plays it: the connection greets first, and is
+/// Flow as signal-flow 63 plays it: the connection greets first, and is
 /// answered with the receipt for the contract Flow was built with.
 fn greeted(stream: &mut UnixStream) {
     use signal_flow::Contracted;
@@ -52,9 +52,9 @@ fn greeted(stream: &mut UnixStream) {
         &flow_frame(stream),
     )
     .unwrap();
-    assert_eq!(greeting, signal_flow::Query::greeting());
+    assert_eq!(greeting, signal_flow::Input::greeting());
     let receipt =
-        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting)).unwrap();
+        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::receipt(&greeting)).unwrap();
     write_flow_frame(stream, &receipt);
 }
 
@@ -116,14 +116,14 @@ fn flow_binds(socket: &std::path::Path) -> UnixListener {
 }
 
 /// One subscription Flow takes, with its query.
-fn accepted(listener: &UnixListener) -> (UnixStream, signal_flow::Query) {
+fn accepted(listener: &UnixListener) -> (UnixStream, signal_flow::Input) {
     let (taken, take) = mpsc::channel();
     let listener = listener.try_clone().unwrap();
     std::thread::spawn(move || {
         let (mut peer, _) = listener.accept().unwrap();
         greeted(&mut peer);
         let query =
-            rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(&flow_frame(&mut peer))
+            rkyv::from_bytes::<signal_flow::Input, rkyv::rancor::Error>(&flow_frame(&mut peer))
                 .unwrap();
         let _ = taken.send((peer, query));
     });
@@ -143,7 +143,7 @@ fn opening(at: i64) -> Vec<u8> {
         flow_id: signal_flow::FlowId("ff3882".into()),
         observed_at: signal_flow::ObservedAt(at),
     };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Response::TurnEndsObserved(vec![end]))
+    rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Output::TurnEndsObserved(vec![end]))
         .unwrap()
         .to_vec()
 }
@@ -205,7 +205,7 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
     let (mut peer, query) = accepted(&first);
     assert_eq!(
         query,
-        signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+        signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
     );
     write_flow_frame(&mut peer, &opening(unix_now() - 5));
     let read_first = match response(&mut changes) {
@@ -236,7 +236,7 @@ fn flow_going_leaves_energy_running_and_its_return_resubscribes_once_and_reads_w
     let (mut peer, query) = accepted(&second);
     assert_eq!(
         query,
-        signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+        signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
     );
     write_flow_frame(&mut peer, &opening(unix_now()));
     match response(&mut changes) {

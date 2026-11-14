@@ -140,19 +140,19 @@ checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
 name = "energy-nexus-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "energy-nexus-wire",
  "ethos-zero 19.2.0",
  "meta-signal-energy-nexus",
  "rkyv",
  "signal-energy-nexus",
- "signal-flow",
+ "signal-flow 63.0.0",
 ]
 
 [[package]]
 name = "energy-nexus-daemon"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "energy-nexus-core",
  "energy-nexus-emission",
@@ -163,14 +163,14 @@ dependencies = [
  "rkyv",
  "signal",
  "signal-energy-nexus",
- "signal-flow",
+ "signal-flow 63.0.0",
  "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "energy-nexus-emission"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rkyv",
  "signal",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-translator"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "datom-codec 0.33.1",
  "energy-nexus-emission",
@@ -191,7 +191,7 @@ dependencies = [
  "serde_json",
  "signal",
  "signal-energy-nexus",
- "signal-flow",
+ "signal-flow 63.0.0",
  "tempfile",
  "time",
  "ureq",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-wire"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "nix",
  "rkyv",
@@ -241,6 +241,20 @@ dependencies = [
 name = "ethos-zero"
 version = "22.0.0"
 source = "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45#1976e45fe1edfd5676cb33919dba1ec20c785a02"
+dependencies = [
+ "datom-codec 0.33.1",
+ "prettyplease",
+ "proc-macro2",
+ "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
+ "quote",
+ "rkyv",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "ethos-zero"
+version = "27.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=8c95310#8c95310c4c372cfe115cdebc3e85021b98cf2974"
 dependencies = [
  "datom-codec 0.33.1",
  "prettyplease",
@@ -753,7 +767,7 @@ dependencies = [
  "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
  "rkyv",
  "signal",
- "signal-flow",
+ "signal-flow 61.0.0",
 ]
 
 [[package]]
@@ -763,6 +777,19 @@ source = "git+https://github.com/LiGoldragon/signal-flow?rev=4871bb81c1119fe72dc
 dependencies = [
  "datom-codec 0.33.1",
  "ethos-zero 22.0.0",
+ "flow-ethos",
+ "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
+ "rkyv",
+ "signal",
+]
+
+[[package]]
+name = "signal-flow"
+version = "63.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=4982eeb6f8b2ef8a86a0070dc02acaf0f2088272#4982eeb6f8b2ef8a86a0070dc02acaf0f2088272"
+dependencies = [
+ "datom-codec 0.33.1",
+ "ethos-zero 27.0.0",
  "flow-ethos",
  "protos 0.33.0 (git+https://github.com/LiGoldragon/protos?rev=c93b598)",
  "rkyv",

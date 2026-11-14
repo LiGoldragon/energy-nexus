@@ -182,11 +182,11 @@ pub fn turn_end(flow: &signal_flow::TurnEnd) -> TurnEnd {
 }
 /// What one frame from Flow's turn-end subscription says, for the daemon.
 pub(crate) fn turn_end_outcome(frame: &[u8]) -> Outcome {
-    match rkyv::from_bytes::<signal_flow::Response, rkyv::rancor::Error>(frame) {
-        Ok(signal_flow::Response::TurnEndsObserved(ends)) => {
+    match rkyv::from_bytes::<signal_flow::Output, rkyv::rancor::Error>(frame) {
+        Ok(signal_flow::Output::TurnEndsObserved(ends)) => {
             Outcome::TurnEndsObserved(ends.iter().map(turn_end).collect())
         }
-        Ok(signal_flow::Response::TurnEnded(end)) => Outcome::TurnEnded(turn_end(&end)),
+        Ok(signal_flow::Output::TurnEnded(end)) => Outcome::TurnEnded(turn_end(&end)),
         _ => Outcome::Down,
     }
 }
@@ -775,13 +775,13 @@ printf '%s\n' "$1" > {}
         assert!(transcript.contains(
             "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Codex is Low.» }"
         ));
-        // The argument is a Query of the Flow contract Energy is built with,
-        // signal-flow 61.0.0: a Send to the configured recipient.
-        let query = Potential::<signal_flow::Query>::from(transcript.trim())
+        // The argument is an Input of the Flow contract Energy is built with,
+        // signal-flow 63.0.0: a Send to the configured recipient.
+        let input = Potential::<signal_flow::Input>::from(transcript.trim())
             .actualize(&mut budget())
-            .expect("the reminder reads as a Flow Query");
-        match query {
-            signal_flow::Query::Send(send) => assert_eq!(send.address, recipient.0),
+            .expect("the reminder reads as a Flow Input");
+        match input {
+            signal_flow::Input::Send(send) => assert_eq!(send.address, recipient.0),
             other => panic!("a reminder is a Send, got {other:?}"),
         }
     }
@@ -888,21 +888,21 @@ sleep 60
     }
     #[test]
     fn flow_turn_end_frames_become_energy_outcomes() {
-        use signal_flow::{HarnessKind, Model, Response};
-        let frame = |response: &Response| {
-            rkyv::to_bytes::<rkyv::rancor::Error>(response).unwrap().to_vec()
+        use signal_flow::{HarnessKind, Model, Output};
+        let frame = |output: &Output| {
+            rkyv::to_bytes::<rkyv::rancor::Error>(output).unwrap().to_vec()
         };
         let claude = flow_turn_end(HarnessKind::Claude, Model::Opus);
         let codex = flow_turn_end(HarnessKind::Codex, Model::Sol);
         assert_eq!(
-            turn_end_outcome(&frame(&Response::TurnEndsObserved(vec![
+            turn_end_outcome(&frame(&Output::TurnEndsObserved(vec![
                 claude.clone(),
                 codex.clone()
             ]))),
             Outcome::TurnEndsObserved(vec![turn_end(&claude), turn_end(&codex)])
         );
         assert_eq!(
-            turn_end_outcome(&frame(&Response::TurnEnded(codex.clone()))),
+            turn_end_outcome(&frame(&Output::TurnEnded(codex.clone()))),
             Outcome::TurnEnded(turn_end(&codex))
         );
         assert_eq!(turn_end_outcome(b"not a frame"), Outcome::Down);

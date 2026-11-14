@@ -41,7 +41,7 @@ fn write_flow_frame(stream: &mut UnixStream, bytes: &[u8]) {
     stream.write_all(bytes).unwrap();
 }
 
-/// Flow as signal-flow 61 plays it: the connection greets first, and is
+/// Flow as signal-flow 63 plays it: the connection greets first, and is
 /// answered with the receipt for the contract Flow was built with.
 fn greeted(stream: &mut UnixStream) {
     use signal_flow::Contracted;
@@ -49,9 +49,9 @@ fn greeted(stream: &mut UnixStream) {
         &flow_frame(stream),
     )
     .unwrap();
-    assert_eq!(greeting, signal_flow::Query::greeting());
+    assert_eq!(greeting, signal_flow::Input::greeting());
     let receipt =
-        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Query::receipt(&greeting)).unwrap();
+        rkyv::to_bytes::<rkyv::rancor::Error>(&signal_flow::Input::receipt(&greeting)).unwrap();
     write_flow_frame(stream, &receipt);
 }
 
@@ -122,7 +122,7 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
         let (mut peer, _) = flow.accept().unwrap();
         greeted(&mut peer);
         let query =
-            rkyv::from_bytes::<signal_flow::Query, rkyv::rancor::Error>(&flow_frame(&mut peer))
+            rkyv::from_bytes::<signal_flow::Input, rkyv::rancor::Error>(&flow_frame(&mut peer))
                 .unwrap();
         let _ = subscribed.send(query);
         opening.recv().unwrap();
@@ -137,7 +137,7 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
             observed_at: signal_flow::ObservedAt(turn_ended_at),
         };
         let frame = rkyv::to_bytes::<rkyv::rancor::Error>(
-            &signal_flow::Response::TurnEndsObserved(vec![codex_end]),
+            &signal_flow::Output::TurnEndsObserved(vec![codex_end]),
         )
         .unwrap();
         write_flow_frame(&mut peer, &frame);
@@ -181,7 +181,7 @@ fn the_first_reading_is_made_on_the_turn_ends_opening_and_not_lost() {
         .expect("the daemon subscribes to Flow's turn ends at start");
     assert_eq!(
         query,
-        signal_flow::Query::Observe(signal_flow::ObserveSelection::TurnEnds)
+        signal_flow::Input::Observe(signal_flow::ObserveSelection::TurnEnds)
     );
     assert!(!log.exists(), "nothing is read before an event");
 
