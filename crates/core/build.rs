@@ -6,7 +6,7 @@ use ethos_zero::{Actualizing, File, Generating, Potential};
 fn main() {
     let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest"));
     let ethos = manifest.join("../../ethos");
-    for name in ["operation"] {
+    for name in ["memory", "operation"] {
         let source_path = ethos.join(format!("{name}.ethos"));
         let generated_path = manifest.join(format!("src/generated/{name}.rs"));
         println!("cargo:rerun-if-changed={}", source_path.display());

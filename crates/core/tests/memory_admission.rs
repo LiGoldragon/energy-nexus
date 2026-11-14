@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use energy_nexus_core::{unversioned, version1, Configuring, Memory, Remembering};
+use energy_nexus_core::{
+    unversioned, version1, Configuring, Memory, RedeemExpiring, RedeemUsedAtLeast, Remembering,
+};
 use energy_nexus_wire::{Admission, Earlier, MemoryRefusal, Persisted};
 use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
 use signal_energy_nexus::{Instant, Level, Minutes, Name, Percent, Provider, Target, Threshold};
@@ -130,7 +132,7 @@ fn the_archive_written_before_the_envelope_is_upgraded_for_every_layer() {
         assert_eq!(bytes.len(), 142);
         assert_eq!(bytes[49], index as u8, "the Layer discriminant");
         let (memory, uncarried) = upgraded(&root, &bytes);
-        assert!(memory.configuration().reminders.is_empty());
+        assert!(memory.configuration().reminder_vector.is_empty());
         assert_eq!(uncarried.len(), 1);
         assert_eq!(uncarried[0].recipient.0.layer, layer);
         assert_eq!(
@@ -148,25 +150,25 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
     let (memory, uncarried) = upgraded(&root, OLD_FULL);
     // Its Polling 5 is dropped: the current layout has no interval.
     let configuration = memory.configuration();
-    assert!(configuration.thresholds.contains(&Threshold {
+    assert!(configuration.threshold_vector.contains(&Threshold {
         level: Level::Fair,
         left: signal_energy_nexus::Left(Percent(25))
     }));
-    assert_eq!(configuration.redeem_expiring, Minutes(720));
-    assert_eq!(configuration.redeem_used_at_least, Percent(3));
-    assert!(configuration.targets.contains(&ProviderTarget {
+    assert_eq!(configuration.redeem_expiring, RedeemExpiring(Minutes(720)));
+    assert_eq!(configuration.redeem_used_at_least, RedeemUsedAtLeast(Percent(3)));
+    assert!(configuration.targets.0.contains(&ProviderTarget {
         provider: Provider::Codex,
         target: Target::SpendBy(Instant(1762450320)),
     }));
     assert_eq!(
-        configuration.window_targets,
+        configuration.window_targets.0,
         vec![WindowTarget {
             provider: Provider::Claude,
             name: Name::FableWeek,
             target: Target::Even,
         }]
     );
-    assert!(configuration.reminders.is_empty());
+    assert!(configuration.reminder_vector.is_empty());
     assert_eq!(memory.history().len(), 3);
     let claude = memory.latest(&Provider::Claude).expect("Claude's latest");
     assert_eq!(claude.reading.window_vector.len(), 3);
@@ -298,7 +300,7 @@ fn an_entry_that_cannot_be_read_is_refused_and_a_link_is_read_through() {
     std::os::unix::fs::symlink(&target, root.memory()).expect("link to a memory");
     match Memory::load(&root.memory()).unwrap() {
         Admission::Admitted(read) => {
-            assert_eq!(read.configuration().redeem_expiring, Minutes(9))
+            assert_eq!(read.configuration().redeem_expiring, RedeemExpiring(Minutes(9)))
         }
         other => panic!("a link to a memory is read through, got {other:?}"),
     }
@@ -404,13 +406,13 @@ fn a_stored_polling_interval_is_dropped_by_the_upgrade() {
         other => panic!("format version 1 is upgraded, got {other:?}"),
     };
     let configuration = memory.configuration();
-    assert_eq!(configuration.redeem_expiring, Minutes(600));
-    assert_eq!(configuration.redeem_used_at_least, Percent(2));
-    assert!(configuration.thresholds.contains(&Threshold {
+    assert_eq!(configuration.redeem_expiring, RedeemExpiring(Minutes(600)));
+    assert_eq!(configuration.redeem_used_at_least, RedeemUsedAtLeast(Percent(2)));
+    assert!(configuration.threshold_vector.contains(&Threshold {
         level: Level::Fair,
         left: signal_energy_nexus::Left(Percent(30))
     }));
-    assert_eq!(configuration.reminders.len(), 1);
+    assert_eq!(configuration.reminder_vector.len(), 1);
     // Written as version 2, which has no interval, and read back as it is.
     written_in_the_envelope(&root, &memory);
 }

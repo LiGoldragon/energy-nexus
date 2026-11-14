@@ -8,7 +8,9 @@ No Energy wire or memory change. Repins signal-energy-nexus to `e0eb9b7` and met
 
 **Operation generated.** `ethos/operation.ethos` follows the running code (`Levelled.LevelChange`, `Failed.Refused` imported from the contract) and generates `crates/core/src/generated/operation.rs`, checked by the core's `build.rs`; the daemon's hand `Operation` and `OperationOutcome` are gone. `LevelChange.old` is the newtype `Old`. The public socket is answered through the contract's generated `Answerable` dispatch. The stale `ethos/library.ethos` is removed: the Library is signal-energy-nexus's.
 
-**Still hand-written here** (later steps): the Memory records of `crates/core`, the emission contract of `crates/emission`, and the translator's `Programs`.
+**Memory generated.** `ethos/memory.ethos` declares the stored root `Memory.{ Vector<Latest> History Configuration }` and generates `crates/core/src/generated/memory.rs`; the hand `Memory`, `Latest` and `Configuration` are gone. `Configuration`'s defaults are `impl Default`, its rules `impl Validating`, on the generated type. Fields follow the Ethos: `latest_vector`, `history: History`, `threshold_vector`, `reminder_vector`, `redeem_expiring: RedeemExpiring`, `redeem_used_at_least: RedeemUsedAtLeast`, `targets: Targets`, `window_targets: WindowTargets`. The bytes are the hand layout's (`tests/memory_hand_and_generated.rs`); `energy.rkyv` stays format version 2. The envelope and the frozen `unversioned` and `version1` layouts stay hand-written. `Answer`, which nothing used, is gone from the Ethos.
+
+**Still hand-written here** (later steps): the emission contract of `crates/emission`, and the translator's `Programs`.
 
 ## 0.3.3 — signal-flow 63: Input and Output
 

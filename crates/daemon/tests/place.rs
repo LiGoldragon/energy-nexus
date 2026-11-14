@@ -193,8 +193,8 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_served() {
     match Memory::load(&shared.place.memory()).unwrap() {
         Admission::Admitted(memory) => {
             assert_eq!(memory.history().len(), 3);
-            assert_eq!(memory.configuration().redeem_expiring.0, 720);
-            assert!(memory.configuration().reminders.is_empty());
+            assert_eq!(memory.configuration().redeem_expiring.0.0, 720);
+            assert!(memory.configuration().reminder_vector.is_empty());
         }
         other => panic!("the upgraded memory is current, got {other:?}"),
     }
