@@ -15,6 +15,7 @@ signal-energy-nexus.workspace=true
 meta-signal-energy-nexus.workspace=true
 energy-nexus-wire={path="../wire"}
 rkyv.workspace=true
+jiff.workspace=true
 datom-codec={git="https://github.com/LiGoldragon/datom-codec",rev="09a0526",optional=true}
 
 [build-dependencies]

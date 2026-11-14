@@ -43,6 +43,10 @@ pub struct WindowTargets(pub std::vec::Vec<signal_energy_nexus::WindowTarget>);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Schedule(pub std::vec::Vec<signal_energy_nexus::Span>);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Configuration {
     pub threshold_vector: std::vec::Vec<signal_energy_nexus::Threshold>,
     pub reminder_vector: std::vec::Vec<signal_energy_nexus::Reminder>,
@@ -50,4 +54,8 @@ pub struct Configuration {
     pub redeem_used_at_least: RedeemUsedAtLeast,
     pub targets: Targets,
     pub window_targets: WindowTargets,
+    pub schedule: Schedule,
+    pub override_vector: std::vec::Vec<signal_energy_nexus::Override>,
+    pub baseline: signal_energy_nexus::Baseline,
+    pub time_zone_option: std::option::Option<signal_energy_nexus::TimeZone>,
 }

@@ -2,21 +2,24 @@ mod schedule;
 
 use energy_nexus_core::operation::{Operation, Outcome as OperationOutcome, Reminding_Data};
 use energy_nexus_core::{
-    Configuring, Levelling, Memory, Pacing, RedeemDecision, Redeeming, Remembering, Reminding,
+    Configuring, Levelling, Memory, OwnerZone, Pacing, RedeemDecision, Redeeming, Remembering,
+    Reminding,
 };
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission,
     Idempotency, Input as EmissionInput, Observation, Outcome as ExternalOutcome,
     Output as EmissionOutput, Send,
 };
-use schedule::{Event, Reads, Schedule, WallClock};
+use schedule::{Clock, Event, Reads, Schedule, WallClock};
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
     OwningSockets, Persisted, Place, PlacedSocket, PlacesSocket, Readiness, SocketPathing,
     Upgrade,
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
-use signal_energy_nexus::{Answerable, Call, Changed_Data, Output, Provider, Read_Data, Refused, Reset};
+use signal_energy_nexus::{
+    Answerable, Call, Changed_Data, Instant, Output, Provider, Read_Data, Refused, Reset,
+};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -95,10 +98,7 @@ impl Nexus {
                 }
             }
             Operation::Redeeming(provider) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_secs() as i64)
-                    .unwrap_or(0);
+                let now = WallClock::default().unix_now();
                 match self.memory.redeem_decision(&provider, now) {
                     RedeemDecision::Allowed(reset) => {
                         let key = Idempotency(format!("energy:{}:{}", reset.reset_id.0, now));
@@ -138,7 +138,10 @@ impl Acting for Nexus {
     fn recall(&self, provider: Provider) -> Output {
         match self.memory.latest(&provider) {
             Some(latest) => Output::Read(Read_Data {
-                pace_vector: latest.reading.pace(self.memory.configuration()),
+                pace_vector: latest.reading.pace(
+                    self.memory.configuration(),
+                    &self.memory.configuration().owner_zone(),
+                ),
                 reading: latest.reading.clone(),
             }),
             None => Output::Refused(Refused::ProviderDown(provider)),
@@ -168,7 +171,8 @@ impl Acting for Nexus {
                         }));
                     }
                 }
-                let pace_vector = reading.pace(self.memory.configuration());
+                let configuration = self.memory.configuration();
+                let pace_vector = reading.pace(configuration, &configuration.owner_zone());
                 Output::Read(Read_Data {
                     reading,
                     pace_vector,
@@ -403,7 +407,7 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
     let response = match nexus.lock() {
         Ok(mut n) => {
             let mut candidate = n.memory.clone();
-            match candidate.configure(set) {
+            match candidate.configure(set, Instant(WallClock::default().unix_now())) {
                 Ok(applied) => match n.commit(candidate) {
                     Ok(()) => meta_signal_energy_nexus::Output::Configured(applied),
                     Err(refusal) => meta_signal_energy_nexus::Output::ConfigureRefused(format!(

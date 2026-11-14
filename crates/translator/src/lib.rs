@@ -728,6 +728,10 @@ fn send_reminder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Held by each test that writes a fixture program and runs it: a
+    /// program another test's fork still holds open for writing cannot be
+    /// executed (ETXTBSY), so no fixture is written while another runs.
+    static FIXTURE_PROGRAM: Mutex<()> = Mutex::new(());
     #[test]
     fn codex_fixture_maps_windows_and_resets() {
         let value = json!({"ordinaryUsageAllowed":false,"rateLimits":{"primary":{"usedPercent":8,"resetsAt":20,"windowDurationMins":300},"secondary":{"usedPercent":34,"resetsAt":30,"windowDurationMins":10080}},"rateLimitResetCredits":{"credits":[{"id":"rc_1","status":"available","expiresAt":40}]}});
@@ -758,6 +762,7 @@ mod tests {
     #[test]
     fn flow_reminder_fixture_records_one_soft_notice() {
         use std::os::unix::fs::PermissionsExt;
+        let _program = FIXTURE_PROGRAM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let log = directory.path().join("flow-nexus.log");
         let program = directory.path().join("flow-nexus");
@@ -805,6 +810,7 @@ printf '%s\n' "$1" > {}
     #[test]
     fn codex_app_server_is_reaped_after_its_answer() {
         use std::os::unix::fs::PermissionsExt;
+        let _program = FIXTURE_PROGRAM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let pid = directory.path().join("app-server.pid");
         let program = directory.path().join("codex");

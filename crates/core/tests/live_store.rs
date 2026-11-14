@@ -4,7 +4,7 @@
 //! memory is written back: a current file is written back identical, an
 //! earlier one upgraded and read back as it was carried. Ignored unless run
 //! by hand with the copies at hand.
-use energy_nexus_core::{Memory, Remembering, Configuring, Validating};
+use energy_nexus_core::{version2, Configuring, Memory, Remembering, Validating};
 use energy_nexus_wire::{Admission, Persisted};
 
 #[test]
@@ -35,6 +35,25 @@ fn every_live_copy_is_read_whole_and_written_back() {
             Admission::Absent => panic!("the copy is absent"),
         };
         memory.configuration().validate().expect("its rules hold");
+        // A format version 2 copy: read in the frozen layout on its own, and
+        // carried record for record, every target and every reading.
+        if original[8..12] == 2u32.to_le_bytes() {
+            let mut archive = rkyv::util::AlignedVec::<16>::new();
+            archive.extend_from_slice(&original[20..]);
+            let old = rkyv::from_bytes::<version2::Memory, rkyv::rancor::Error>(&archive)
+                .expect("the copy reads in the version 2 layout");
+            assert_eq!(Memory::from(old.clone()), memory, "carried whole");
+            assert_eq!(memory.history(), old.history.as_slice());
+            assert_eq!(memory.latest_vector, old.latest);
+            assert_eq!(memory.configuration().targets.0.len(), old.configuration.targets.len());
+            println!(
+                "  version 2: {} readings, {} targets ({:?}), {} window targets carried; schedule empty, baseline 100, zone the system's",
+                old.history.len(),
+                old.configuration.targets.len(),
+                old.configuration.targets.iter().map(|target| &target.target).collect::<Vec<_>>(),
+                old.configuration.window_targets.len()
+            );
+        }
         let mut latest = 0;
         for provider in [signal_energy_nexus::Provider::Claude, signal_energy_nexus::Provider::Codex] {
             if let Some(record) = memory.latest(&provider) {

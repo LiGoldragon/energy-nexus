@@ -2,7 +2,7 @@ use datom_codec::{Actualizing, Potential};
 use energy_nexus_translator::cli::ConfiguredPlace;
 use energy_nexus_translator::{TextClienting, Translator};
 use energy_nexus_wire::Place;
-use signal_energy_nexus::{Provider, Output, Target};
+use signal_energy_nexus::{Decimating, Output, Provider, Target};
 
 fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
     let text = match provider {
@@ -42,10 +42,10 @@ fn show(read: signal_energy_nexus::Read_Data) {
             .unwrap_or_else(|| "the current period".into());
         let target = match pace.target {
             Target::Even => "evenly".into(),
-            Target::SpendBy(instant) => format!("by {}", instant.0),
+            Target::SpendBy(spend) => format!("{}% by {}", spend.percent.0, spend.instant.0),
         };
         println!(
-            "{:?} {:?}: {}% used over {}; target {} expects {}% now; {:?}, with {}% per day from here.",
+            "{:?} {:?}: {}% used over {}; target {} expects {}% now, counted in useful hours; {:?}. {} hours left, {} useful hours; {}% per useful hour from here.",
             pace.provider,
             pace.name,
             pace.used.0.0,
@@ -53,7 +53,9 @@ fn show(read: signal_energy_nexus::Read_Data) {
             target,
             pace.expected.0.0,
             pace.standing,
-            pace.per_day.0.0
+            pace.hours_left.0.0,
+            pace.useful_left.0.float(),
+            pace.per_useful_hour.0.float()
         );
     }
 }

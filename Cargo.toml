@@ -7,9 +7,12 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "5c1ff2f61512df461574e747b4af0a7bc3923cfe", default-features = false }
-meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "fa3e3de3faa472dbf5106825aebf1a42af5e61fa", default-features = false }
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "8c861ec2b52be29f13c616c3501557bc38708d22", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "24958c7417d251525c7823c3c0ca91ff51401b9c", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "4982eeb6f8b2ef8a86a0070dc02acaf0f2088272", default-features = false }
+# The owner's time zone: the system's, or a configured IANA name read from the
+# bundled database, so a name resolves alike on every host and in every build.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 tokio = { version = "1", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
