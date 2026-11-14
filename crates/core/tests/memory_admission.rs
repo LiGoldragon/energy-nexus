@@ -1,11 +1,11 @@
 //! Memory is read through its envelope. Only a missing entry makes a memory
 //! new; the archive written before the envelope and an envelope of format
-//! version 1 are upgraded on open; a damaged or foreign file is refused and
+//! version 1 or 2 are upgraded on open; a damaged or foreign file is refused and
 //! left as it is.
 
 use std::path::{Path, PathBuf};
 
-use energy_nexus_core::{unversioned, version1, Configuring, Memory, Remembering};
+use energy_nexus_core::{unversioned, version1, version2, Configuring, Memory, Remembering};
 use energy_nexus_wire::{Admission, Earlier, MemoryRefusal, Persisted};
 use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
 use signal_energy_nexus::{Instant, Level, Minutes, Name, Percent, Provider, Target, Threshold};
@@ -100,7 +100,7 @@ fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<unversioned::Reminder>) {
 fn written_in_the_envelope(root: &Root, memory: &Memory) {
     let bytes = std::fs::read(root.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
     match Memory::load(&root.memory()).unwrap() {
         Admission::Admitted(reopened) => {
             assert_eq!(reopened.configuration(), memory.configuration());
@@ -411,6 +411,118 @@ fn a_stored_polling_interval_is_dropped_by_the_upgrade() {
         left: Percent(30)
     }));
     assert_eq!(configuration.reminders.len(), 1);
-    // Written as version 2, which has no interval, and read back as it is.
+    // Written as version 3, which has no interval, and read back as it is.
+    written_in_the_envelope(&root, &memory);
+}
+
+/// A memory energy-nexus 0.3.2 wrote, format version 2: no schedule.
+fn version_two_file() -> Vec<u8> {
+    use signal_energy_nexus::{Address, Name, Reading, Recipient, Reminder, Window};
+    let reading = Reading {
+        provider: Provider::Codex,
+        allowed: true,
+        window_vector: vec![Window {
+            name: Name::Week,
+            used: Percent(35),
+            resets: Instant(1795054860),
+            duration: Minutes(10080),
+        }],
+        reset_vector: Vec::new(),
+        at: Instant(1794610200),
+    };
+    let old = version2::Memory {
+        latest: vec![energy_nexus_core::Latest {
+            provider: Provider::Codex,
+            reading: reading.clone(),
+            level: Level::Fair,
+        }],
+        history: vec![reading],
+        configuration: version2::Configuration {
+            thresholds: vec![Threshold {
+                level: Level::Fair,
+                left: Percent(30),
+            }],
+            reminders: vec![Reminder {
+                provider: Provider::Codex,
+                level: Level::Low,
+                recipient: Recipient(Address {
+                    aspect: signal_flow::Aspect::Psyche,
+                    topic: signal_flow::Topic("core".into()),
+                    model: signal_flow::Model::Opus,
+                }),
+            }],
+            redeem_expiring: Minutes(600),
+            redeem_used_at_least: Percent(2),
+            targets: vec![ProviderTarget {
+                provider: Provider::Codex,
+                target: Target::SpendBy(Instant(1795000000)),
+            }],
+            window_targets: vec![WindowTarget {
+                provider: Provider::Claude,
+                name: Name::FableWeek,
+                target: Target::Even,
+            }],
+        },
+    };
+    let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&old).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ENXMEMRY");
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(archive.as_slice());
+    bytes
+}
+
+#[test]
+fn format_version_two_is_carried_whole_into_an_empty_schedule() {
+    let root = Root::new("version-two");
+    std::fs::write(root.memory(), version_two_file()).unwrap();
+    let memory = match Memory::load(&root.memory()).expect("format version 2 opens") {
+        Admission::Upgraded(Earlier::Version(2), upgrade) => {
+            assert!(upgrade.uncarried.is_empty());
+            upgrade.memory
+        }
+        other => panic!("format version 2 is upgraded, got {other:?}"),
+    };
+    let configuration = memory.configuration();
+    assert_eq!(configuration.redeem_expiring, Minutes(600));
+    assert_eq!(configuration.redeem_used_at_least, Percent(2));
+    assert_eq!(configuration.reminders.len(), 1);
+    assert_eq!(configuration.targets.len(), 1);
+    assert_eq!(configuration.window_targets.len(), 1);
+    assert!(configuration.schedule.is_empty());
+    assert!(configuration.overrides.is_empty());
+    assert_eq!(
+        configuration.baseline,
+        signal_energy_nexus::Baseline(Percent(100)),
+        "every hour counts whole, so pace reads as it did"
+    );
+    assert_eq!(memory.history().len(), 1);
+    assert_eq!(memory.latest(&Provider::Codex).unwrap().level, Level::Fair);
+    written_in_the_envelope(&root, &memory);
+}
+
+#[test]
+fn a_schedule_survives_a_restart() {
+    use signal_energy_nexus::{Baseline, Hour, Override, Span, Usefulness, Weekday};
+    let root = Root::new("schedule");
+    let mut memory = Memory::default();
+    for set in [
+        meta_signal_energy_nexus::Set::Baseline(Baseline(Percent(20))),
+        meta_signal_energy_nexus::Set::Span(Span {
+            weekday_vector: vec![Weekday::Saturday, Weekday::Sunday],
+            from: Hour(9),
+            to: Hour(13),
+            usefulness: Usefulness(Percent(50)),
+        }),
+        meta_signal_energy_nexus::Set::Override(Override {
+            from: Instant(1794859200),
+            to: Instant(1794866400),
+            usefulness: Usefulness(Percent(0)),
+        }),
+    ] {
+        memory.configure(set).unwrap();
+    }
+    memory.save(&root.memory()).unwrap();
     written_in_the_envelope(&root, &memory);
 }
