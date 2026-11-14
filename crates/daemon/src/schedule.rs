@@ -14,6 +14,10 @@
 //!   reading is older than the last turn end on the provider (or there is
 //!   none), when it is read first.
 //!
+//! A read that fails answers with the reading held, and the schedule takes
+//! only a reading newer than the one it knows: the held one moves nothing, so
+//! a failed read sets no alarm and starts no read of its own.
+//!
 //! When nothing happens, nothing is read.
 use energy_nexus_core::Resetting;
 use energy_nexus_emission::TurnEnd;
@@ -201,9 +205,14 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
     }
     /// A reading is the provider's latest: its time, and its next window
     /// reset as the provider's alarm.
+    /// Only a reading newer than the one known is: the reading a failed read
+    /// answers with is the one already held, and moves nothing.
     fn reading(&mut self, reading: &Reading) {
         let resets = reading.next_reset().map(|instant| instant.0);
         let track = self.track(&reading.provider);
+        if track.read_at.is_some_and(|known| reading.at.0.0 <= known) {
+            return;
+        }
         track.read_at = Some(reading.at.0.0);
         self.resets(&reading.provider, resets);
     }
@@ -427,6 +436,8 @@ mod tests {
         gate: Option<Arc<Semaphore>>,
         next_reset: i64,
         down: Arc<Mutex<bool>>,
+        /// Reads fail and answer with the reading already held.
+        holding: Arc<Mutex<bool>>,
     }
     impl Provided {
         fn new(next_reset: i64) -> Self {
@@ -437,6 +448,7 @@ mod tests {
                 gate: None,
                 next_reset,
                 down: Arc::default(),
+                holding: Arc::default(),
             }
         }
         fn held(mut self) -> Self {
@@ -469,6 +481,9 @@ mod tests {
             }
             if *self.down.lock().unwrap() {
                 return Output::Refused(Refused::ProviderDown(provider));
+            }
+            if *self.holding.lock().unwrap() {
+                return self.recall(provider).await;
             }
             let at = self.now();
             let resets = if self.next_reset > 0 { at + self.next_reset } else { 0 };
@@ -586,6 +601,27 @@ mod tests {
                 (Provider::Claude, START + 3_600 + 5 * 3_600)
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_answered_with_the_reading_already_held_moves_nothing() {
+        // In memory: a Claude reading whose window reset an hour ago, so its
+        // alarm fires at once and reads. The read fails and answers with the
+        // reading held; that reading's reset is long past, and it must not set
+        // the alarm again, or the schedule would read in a loop.
+        let provided = Provided::new(0);
+        *provided.holding.lock().unwrap() = true;
+        let events = started(
+            &provided,
+            vec![reading(Provider::Claude, START - 7_200, START - 3_600)],
+        );
+        settle().await;
+        assert_eq!(provided.count(&Provider::Claude), 1, "the reset that had come");
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+        settle().await;
+        assert_eq!(provided.count(&Provider::Claude), 1, "nothing for the held reading");
+        let answer = asked(&events, Provider::Claude).await;
+        assert!(matches!(&answer, Output::Read(read) if read.reading.at.0.0 == START - 7_200));
     }
 
     #[tokio::test(start_paused = true)]

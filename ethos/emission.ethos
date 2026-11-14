@@ -12,6 +12,14 @@ Emission
   ClaudeUsage.{}                                           ; carries nothing, so that it bears Emittable
   CodexConsumeReset.{ ResetId Idempotency.String }
   Send.{ Recipient Provider Level }
-  Observation.[ Observed.Reading Down ]                    ; what the translator observed, or the provider down
+  Observation.[ Observed.Reading Down.Failure ]            ; what the translator observed, or the provider down and how
+  Failure.{ Cause Status.Option<HttpStatus> RetryAfter.Option<Seconds> } ; one failed reading: why, the answer's status, and when the provider said to come back
+  Cause.[ Unconfigured                                     ; no program or credentials set
+          CredentialsUnreadable                            ; the credentials file is missing, not JSON, or holds no token
+          Unreached                                        ; the provider did not answer
+          Refused                                          ; the provider answered with a status that is not a success
+          AnswerUnreadable ]                               ; the provider answered and its answer holds no reading
+  HttpStatus.Integer                                       ; the status of the provider's answer
+  Seconds.Integer                                          ; the provider's retry-after, whole seconds from the answer
   Consumption.[ Reset NothingToReset NoCredit AlreadyRedeemed Down ] ; the reset-consumption outcomes
   Delivery.[ Sent Down ] ]                                 ; the reminder submitted, or not

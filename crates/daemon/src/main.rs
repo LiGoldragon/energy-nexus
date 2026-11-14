@@ -6,7 +6,7 @@ use energy_nexus_core::{
     Reminding,
 };
 use energy_nexus_emission::{
-    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission,
+    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission, Failure,
     Idempotency, Input as EmissionInput, Observation, Outcome as ExternalOutcome,
     Output as EmissionOutput, Send,
 };
@@ -20,6 +20,7 @@ use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{
     Answerable, Call, Changed_Data, Instant, Output, Provider, Read_Data, Refused, Reset,
 };
+use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +28,11 @@ struct Nexus {
     memory: Memory,
     subscribers: Vec<UnixStream>,
     place: Place,
+    /// Each provider that said to wait, and the instant it may be read
+    /// again: its failed reading's `retry-after` from when it came.
+    withheld: HashMap<Provider, Instant>,
+    /// Unix seconds now: the wall clock, and in a test one it sets.
+    now: fn() -> i64,
 }
 trait Emitting {
     fn emit(&self, emission: Emission) -> Result<ExternalOutcome, String>;
@@ -51,6 +57,38 @@ impl Emitting for Nexus {
         }
     }
 }
+fn wall_now() -> i64 {
+    WallClock::default().unix_now()
+}
+/// What the Nexus does with a provider that said to wait.
+trait Withholding {
+    /// Notes the instant the provider may be read again, when its failed
+    /// reading carried a `retry-after`.
+    fn withhold(&mut self, provider: &Provider, failure: &Failure);
+    /// The provider is not read before it said to: the instant it may be, when
+    /// that is after `now`.
+    fn withheld_until(&self, provider: &Provider, now: i64) -> Option<i64>;
+}
+impl Withholding for Nexus {
+    fn withhold(&mut self, provider: &Provider, failure: &Failure) {
+        let now = (self.now)();
+        match failure.retry_after_seconds() {
+            Some(seconds) => {
+                self.withheld
+                    .insert(provider.clone(), Instant(now.saturating_add(seconds)));
+            }
+            None => {
+                self.withheld.remove(provider);
+            }
+        }
+    }
+    fn withheld_until(&self, provider: &Provider, now: i64) -> Option<i64> {
+        self.withheld
+            .get(provider)
+            .map(|instant| instant.0)
+            .filter(|until| *until > now)
+    }
+}
 impl Nexus {
     /// Saves the candidate memory and only then makes it the memory in use:
     /// the memory in use never runs ahead of the file, and a failed save
@@ -70,7 +108,13 @@ impl Nexus {
                 match self.emit(emission) {
                     Ok(ExternalOutcome::CodexRateLimitsObserved(Observation::Observed(reading)))
                     | Ok(ExternalOutcome::ClaudeUsageObserved(Observation::Observed(reading))) => {
+                        self.withheld.remove(&provider);
                         OperationOutcome::Read(reading)
+                    }
+                    Ok(ExternalOutcome::CodexRateLimitsObserved(Observation::Down(failure)))
+                    | Ok(ExternalOutcome::ClaudeUsageObserved(Observation::Down(failure))) => {
+                        self.withhold(&provider, &failure);
+                        OperationOutcome::Failed(Refused::ProviderDown(provider))
                     }
                     _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                 }
@@ -132,9 +176,17 @@ trait Acting {
     fn read(&mut self, provider: Provider) -> Output;
     /// The latest reading in memory, with its pace.
     fn recall(&self, provider: Provider) -> Output;
+    /// The reading held, for the journal: its age at `now`, or none held.
+    fn held(&self, provider: &Provider, now: i64) -> String;
     fn redeem(&mut self, provider: Provider) -> Output;
 }
 impl Acting for Nexus {
+    fn held(&self, provider: &Provider, now: i64) -> String {
+        match self.memory.latest(provider) {
+            Some(latest) => format!("the reading held, {} seconds old", now - latest.reading.at.0.0),
+            None => "no reading held".to_string(),
+        }
+    }
     fn recall(&self, provider: Provider) -> Output {
         match self.memory.latest(&provider) {
             Some(latest) => Output::Read(Read_Data {
@@ -148,6 +200,14 @@ impl Acting for Nexus {
         }
     }
     fn read(&mut self, provider: Provider) -> Output {
+        let now = (self.now)();
+        if let Some(until) = self.withheld_until(&provider, now) {
+            eprintln!(
+                "energy-nexus: {provider:?} not read until {until}, as it said; answering with {}",
+                self.held(&provider, now)
+            );
+            return self.recall(provider);
+        }
         match self.attempt(Operation::Reading(provider.clone())) {
             OperationOutcome::Read(reading) => {
                 let levelled = self.attempt(Operation::Levelling(reading.clone()));
@@ -177,6 +237,15 @@ impl Acting for Nexus {
                     reading,
                     pace_vector,
                 })
+            }
+            // The fresh reading failed: the reading held answers, its own
+            // instant its age; the provider is down only when none is held.
+            OperationOutcome::Failed(Refused::ProviderDown(down)) => {
+                eprintln!(
+                    "energy-nexus: {down:?} reading failed; answering with {}",
+                    self.held(&down, now)
+                );
+                self.recall(down)
             }
             OperationOutcome::Failed(refused) => Output::Refused(refused),
             _ => Output::Refused(Refused::ProviderDown(provider)),
@@ -307,6 +376,8 @@ impl Serving for Place {
             memory,
             subscribers: Vec::new(),
             place: self.clone(),
+            withheld: HashMap::new(),
+            now: wall_now,
         }));
         // The schedule: every read Energy makes is its, on an event.
         let schedule = Schedule::new(Daemon(Arc::clone(&nexus)), WallClock::default(), latest);
@@ -455,6 +526,8 @@ mod tests {
         Nexus {
             memory: Memory::default(),
             subscribers: Vec::new(),
+            withheld: HashMap::new(),
+            now: wall_now,
             place: Place {
                 name: energy_nexus_wire::PlaceName("test".into()),
                 runtime: root.join("run"),
@@ -490,6 +563,180 @@ mod tests {
             Admission::Admitted(memory) => memory,
             other => panic!("the committed file is current, got {other:?}"),
         }
+    }
+
+    thread_local! {
+        static NOW: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    }
+    fn fixed_now() -> i64 {
+        NOW.with(|now| now.get())
+    }
+    fn at(now: i64) {
+        NOW.with(|cell| cell.set(now));
+    }
+
+    /// The translator as the daemon meets it on the emission socket: it counts
+    /// each call and answers every one with what the test last set.
+    struct Translating {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        answer: Arc<Mutex<ExternalOutcome>>,
+    }
+    impl Translating {
+        fn at(nexus: &Nexus) -> Self {
+            std::fs::create_dir_all(&nexus.place.runtime).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(nexus.place.emission()).unwrap();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let answer = Arc::new(Mutex::new(ExternalOutcome::CodexRateLimitsObserved(
+                Observation::Down(Failure::of(energy_nexus_emission::Cause::Unreached)),
+            )));
+            let (counted, answering) = (Arc::clone(&calls), Arc::clone(&answer));
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    if stream.read_frame().is_err() {
+                        continue;
+                    }
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let outcome = answering.lock().unwrap().clone();
+                    let signal = EmissionOutput::Emitted(outcome).signalize().unwrap();
+                    let _ = stream.write_frame(signal.bytes());
+                }
+            });
+            Self { calls, answer }
+        }
+        fn answers(&self, outcome: ExternalOutcome) {
+            *self.answer.lock().unwrap() = outcome;
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn down(provider: &Provider, status: i64, retry_after: Option<i64>) -> ExternalOutcome {
+        let failure = Failure {
+            cause: energy_nexus_emission::Cause::Refused,
+            status: energy_nexus_emission::Status(Some(energy_nexus_emission::HttpStatus(status))),
+            retry_after: energy_nexus_emission::RetryAfter(
+                retry_after.map(energy_nexus_emission::Seconds),
+            ),
+        };
+        match provider {
+            Provider::Codex => ExternalOutcome::CodexRateLimitsObserved(Observation::Down(failure)),
+            Provider::Claude => ExternalOutcome::ClaudeUsageObserved(Observation::Down(failure)),
+        }
+    }
+
+    fn held_nexus(name: &str, provider: Provider, used: i64, taken: i64) -> (Nexus, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("energy-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut nexus = nexus(&root);
+        nexus.now = fixed_now;
+        let mut held = reading(used);
+        held.provider = provider;
+        held.at = signal_energy_nexus::At(Instant(taken));
+        assert!(matches!(
+            nexus.attempt(Operation::Levelling(held)),
+            OperationOutcome::Levelled(_)
+        ));
+        (nexus, root)
+    }
+
+    #[test]
+    fn a_failed_reading_is_answered_with_the_reading_held_and_not_with_down() {
+        at(5_000);
+        let (mut nexus, root) = held_nexus("answers-held", Provider::Claude, 10, 4_700);
+        let translator = Translating::at(&nexus);
+        translator.answers(down(&Provider::Claude, 429, None));
+        let answer = nexus.read(Provider::Claude);
+        let Output::Read(read) = answer else {
+            panic!("the held reading answers, got {answer:?}");
+        };
+        assert_eq!(translator.calls(), 1, "the fresh reading was tried");
+        assert_eq!(read.reading.provider, Provider::Claude);
+        assert_eq!(read.reading.at.0, Instant(4_700), "its own instant is its age");
+        assert_eq!(used_by(&nexus.memory, &Provider::Claude), Percent(10), "nothing was levelled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_reading_with_none_held_is_the_provider_down() {
+        at(5_000);
+        let (mut nexus, root) = held_nexus("answers-down", Provider::Codex, 10, 4_700);
+        let translator = Translating::at(&nexus);
+        translator.answers(down(&Provider::Claude, 500, None));
+        assert_eq!(
+            nexus.read(Provider::Claude),
+            Output::Refused(Refused::ProviderDown(Provider::Claude)),
+            "Codex is held, Claude is not"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_provider_that_said_to_wait_is_not_read_before_it_said_and_is_after() {
+        at(1_000);
+        let (mut nexus, root) = held_nexus("retry-after", Provider::Claude, 10, 900);
+        let translator = Translating::at(&nexus);
+        translator.answers(down(&Provider::Claude, 429, Some(60)));
+        assert!(matches!(nexus.read(Provider::Claude), Output::Read(_)));
+        assert_eq!(translator.calls(), 1);
+        // not read again while the 60 seconds run, and answered from memory
+        for now in [1_001, 1_030, 1_059] {
+            at(now);
+            let answer = nexus.read(Provider::Claude);
+            assert!(
+                matches!(&answer, Output::Read(read) if read.reading.at.0 == Instant(900)),
+                "{answer:?}"
+            );
+            assert_eq!(translator.calls(), 1, "not read at {now}");
+        }
+        // once it has passed, read again, and a reading taken is the answer
+        at(1_060);
+        let mut fresh = reading(55);
+        fresh.provider = Provider::Claude;
+        fresh.at = signal_energy_nexus::At(Instant(1_060));
+        translator.answers(ExternalOutcome::ClaudeUsageObserved(Observation::Observed(
+            fresh.clone(),
+        )));
+        let answer = nexus.read(Provider::Claude);
+        assert!(matches!(&answer, Output::Read(read) if read.reading == fresh), "{answer:?}");
+        assert_eq!(translator.calls(), 2, "read once the retry-after had passed");
+        assert!(nexus.withheld.is_empty(), "a reading taken ends the wait");
+        at(1_061);
+        let _ = nexus.read(Provider::Claude);
+        assert_eq!(translator.calls(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failure_that_names_no_retry_after_is_read_again_at_the_next_question() {
+        at(1_000);
+        let (mut nexus, root) = held_nexus("no-retry-after", Provider::Claude, 10, 900);
+        let translator = Translating::at(&nexus);
+        translator.answers(down(&Provider::Claude, 500, None));
+        let _ = nexus.read(Provider::Claude);
+        let _ = nexus.read(Provider::Claude);
+        assert_eq!(translator.calls(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_provider_that_said_to_wait_holds_back_that_provider_only() {
+        at(1_000);
+        let (mut nexus, root) = held_nexus("only-it", Provider::Claude, 10, 900);
+        let translator = Translating::at(&nexus);
+        translator.answers(down(&Provider::Claude, 429, Some(600)));
+        let _ = nexus.read(Provider::Claude);
+        let mut codex = reading(20);
+        codex.at = signal_energy_nexus::At(Instant(1_000));
+        translator.answers(ExternalOutcome::CodexRateLimitsObserved(Observation::Observed(codex)));
+        let answer = nexus.read(Provider::Codex);
+        assert!(matches!(&answer, Output::Read(read) if read.reading.provider == Provider::Codex));
+        assert_eq!(translator.calls(), 2, "Codex was read while Claude waited");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn used_by(memory: &Memory, provider: &Provider) -> Percent {
+        memory.latest(provider).unwrap().reading.window_vector[0].used.0.clone()
     }
 
     #[test]

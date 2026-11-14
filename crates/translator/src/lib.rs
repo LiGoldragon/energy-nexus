@@ -1,7 +1,8 @@
 use datom_codec::{Actualizing, Potential};
 use energy_nexus_emission::{
-    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission, Emittable,
-    Input as EmissionInput, Observation, Outcome, Output as EmissionOutput, Send, TurnEnd,
+    Cause, ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission,
+    Emittable, Failure, HttpStatus, Input as EmissionInput, Observation, Outcome,
+    Output as EmissionOutput, RetryAfter, Seconds, Send, Status, TurnEnd,
 };
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Earlier, Envelope, Framing, MemoryPathing, MemoryRefusal,
@@ -252,11 +253,21 @@ impl Drop for AppServer {
 }
 impl Emittable<Translator> for CodexRateLimits {
     fn emit(&self, translator: &Translator) -> Observation {
-        translator
-            .codex_call("account/rateLimits/read", json!({}))
+        let configured = translator
+            .programs
+            .lock()
             .ok()
-            .and_then(|value| codex_reading(&value))
-            .map_or(Observation::Down, Observation::Observed)
+            .is_some_and(|programs| programs.codex_program.0.is_some());
+        if !configured {
+            return down(Provider::Codex, Failure::of(Cause::Unconfigured));
+        }
+        match translator.codex_call("account/rateLimits/read", json!({})) {
+            Err(_) => down(Provider::Codex, Failure::of(Cause::Unreached)),
+            Ok(value) => codex_reading(&value).map_or_else(
+                || down(Provider::Codex, Failure::of(Cause::AnswerUnreadable)),
+                Observation::Observed,
+            ),
+        }
     }
 }
 impl Emittable<Translator> for CodexConsumeReset {
@@ -277,9 +288,13 @@ impl Emittable<Translator> for ClaudeUsage {
             .lock()
             .ok()
             .and_then(|programs| programs.claude_credentials.0.clone());
-        path.as_deref()
-            .and_then(claude_reading)
-            .map_or(Observation::Down, Observation::Observed)
+        let Some(path) = path else {
+            return down(Provider::Claude, Failure::of(Cause::Unconfigured));
+        };
+        match claude_reading(CLAUDE_USAGE, &path, now()) {
+            Ok(reading) => Observation::Observed(reading),
+            Err(failure) => down(Provider::Claude, failure),
+        }
     }
 }
 impl Emittable<Translator> for Send {
@@ -612,19 +627,78 @@ fn codex_reading(value: &Value) -> Option<Reading> {
         at: At(Instant(now())),
     })
 }
-fn claude_reading(credentials_path: &str) -> Option<Reading> {
-    let text = std::fs::read_to_string(credentials_path).ok()?;
-    let credentials: Value = serde_json::from_str(&text).ok()?;
-    let oauth = credentials.get("claudeAiOauth")?;
-    let token = oauth.get("accessToken")?.as_str()?;
-    let response = ureq::get("https://api.anthropic.com/api/oauth/usage")
+/// Where Claude's usage is read.
+const CLAUDE_USAGE: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Reads Claude's usage at `endpoint` with the credentials at
+/// `credentials_path`; a reading that fails comes back as its `Failure`, with
+/// the answer's status and the `retry-after` it carried, in whole seconds
+/// from `now`.
+fn claude_reading(endpoint: &str, credentials_path: &str, now: i64) -> Result<Reading, Failure> {
+    let unreadable = || Failure::of(Cause::CredentialsUnreadable);
+    let text = std::fs::read_to_string(credentials_path).map_err(|_| unreadable())?;
+    let credentials: Value = serde_json::from_str(&text).map_err(|_| unreadable())?;
+    let token = credentials
+        .get("claudeAiOauth")
+        .and_then(|oauth| oauth.get("accessToken"))
+        .and_then(Value::as_str)
+        .ok_or_else(unreadable)?;
+    let response = ureq::get(endpoint)
+        .config()
+        .http_status_as_error(false)
+        .build()
         .header("Authorization", &format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
         .call()
-        .ok()?;
-    let body = response.into_body().read_to_string().ok()?;
-    let body: Value = serde_json::from_str(&body).ok()?;
-    claude_document(&body)
+        .map_err(|_| Failure::of(Cause::Unreached))?;
+    let status = response.status();
+    let answered = |cause| Failure {
+        cause,
+        status: Status(Some(HttpStatus(i64::from(status.as_u16())))),
+        retry_after: RetryAfter(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| retry_after_seconds(value, now))
+                .map(Seconds),
+        ),
+    };
+    if !status.is_success() {
+        return Err(answered(Cause::Refused));
+    }
+    let failure = answered(Cause::AnswerUnreadable);
+    let body = response
+        .into_body()
+        .read_to_string()
+        .map_err(|_| failure.clone())?;
+    let body: Value = serde_json::from_str(&body).map_err(|_| failure.clone())?;
+    claude_document(&body).ok_or(failure)
+}
+/// A `retry-after` header: whole seconds, or an HTTP date taken against
+/// `now`.
+fn retry_after_seconds(value: &str, now: i64) -> Option<i64> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<i64>() {
+        return Some(seconds.max(0));
+    }
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822)
+        .ok()
+        .map(|date| (date.unix_timestamp() - now).max(0))
+}
+/// A reading that failed: logged on one line, with its cause, status and
+/// `retry-after`, and answered as the provider down.
+fn down(provider: Provider, failure: Failure) -> Observation {
+    eprintln!("{}", down_line(&provider, &failure));
+    Observation::Down(failure)
+}
+/// The journal's line for a failed reading, its failure as a compact datom.
+fn down_line(provider: &Provider, failure: &Failure) -> String {
+    use datom_codec::Datomizable;
+    use protos::{Compactable, Protosizable};
+    format!(
+        "energy-translator: {provider:?} reading failed: {}",
+        failure.datomize(Vec::new()).protosize().compact()
+    )
 }
 fn rfc3339(value: &Value) -> i64 {
     value
@@ -748,6 +822,121 @@ mod tests {
         assert_eq!(reading.window_vector[1].used, Used(Percent(34)));
         assert_eq!(reading.window_vector[2].name, Name::FableWeek);
         assert_eq!(reading.window_vector[2].used, Used(Percent(63)));
+    }
+    /// A provider at a local address that answers one request with `answer`,
+    /// header lines and all, and goes.
+    fn answering(answer: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/api/oauth/usage", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+        endpoint
+    }
+    fn credentials(directory: &std::path::Path) -> String {
+        let path = directory.join("credentials.json");
+        std::fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"token"}}"#).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+    fn failed(status: Option<i64>, retry_after: Option<i64>, cause: Cause) -> Failure {
+        Failure {
+            cause,
+            status: Status(status.map(HttpStatus)),
+            retry_after: RetryAfter(retry_after.map(Seconds)),
+        }
+    }
+    #[test]
+    fn claude_read_refused_is_recorded_with_its_status_and_retry_after() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = answering(
+            "HTTP/1.1 429 Too Many Requests\r\nretry-after: 30\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        );
+        assert_eq!(
+            claude_reading(&endpoint, &credentials(directory.path()), 1_000),
+            Err(failed(Some(429), Some(30), Cause::Refused))
+        );
+    }
+    #[test]
+    fn claude_read_refused_names_the_retry_after_given_as_a_date() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = answering(
+            "HTTP/1.1 429 Too Many Requests\r\nretry-after: Wed, 21 Oct 2015 07:28:00 GMT\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        );
+        // the date is 1445412480; read 100 seconds before it
+        assert_eq!(
+            claude_reading(&endpoint, &credentials(directory.path()), 1_445_412_380),
+            Err(failed(Some(429), Some(100), Cause::Refused))
+        );
+        assert_eq!(retry_after_seconds("7", 0), Some(7));
+        assert_eq!(retry_after_seconds("soon", 0), None);
+        assert_eq!(retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT", 1_445_412_580), Some(0));
+    }
+    #[test]
+    fn claude_read_refused_without_a_retry_after_records_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = answering(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        );
+        assert_eq!(
+            claude_reading(&endpoint, &credentials(directory.path()), 1_000),
+            Err(failed(Some(503), None, Cause::Refused))
+        );
+    }
+    #[test]
+    fn claude_read_answered_is_the_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = answering(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{\"seven_day\":{\"utilization\":34.0,\"resets_at\":\"2026-11-08T10:00:00Z\"},\"five_hour\":null}",
+        );
+        let reading = claude_reading(&endpoint, &credentials(directory.path()), 1_000).unwrap();
+        assert_eq!(reading.window_vector.len(), 1);
+        assert_eq!(reading.window_vector[0].name, Name::Week);
+    }
+    #[test]
+    fn claude_read_answered_with_no_json_is_unreadable_with_its_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = answering(
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\nnope",
+        );
+        assert_eq!(
+            claude_reading(&endpoint, &credentials(directory.path()), 1_000),
+            Err(failed(Some(200), None, Cause::AnswerUnreadable))
+        );
+    }
+    #[test]
+    fn claude_read_with_no_credentials_or_no_provider_says_which() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("absent.json");
+        assert_eq!(
+            claude_reading("http://127.0.0.1:9/", &missing.to_string_lossy(), 0),
+            Err(failed(None, None, Cause::CredentialsUnreadable))
+        );
+        let tokenless = directory.path().join("tokenless.json");
+        std::fs::write(&tokenless, r#"{"claudeAiOauth":{}}"#).unwrap();
+        assert_eq!(
+            claude_reading("http://127.0.0.1:9/", &tokenless.to_string_lossy(), 0),
+            Err(failed(None, None, Cause::CredentialsUnreadable))
+        );
+        // nothing listens at a port that was just released
+        let released = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/", released.local_addr().unwrap());
+        drop(released);
+        assert_eq!(
+            claude_reading(&endpoint, &credentials(directory.path()), 0),
+            Err(failed(None, None, Cause::Unreached))
+        );
+    }
+    #[test]
+    fn a_failed_reading_is_one_journal_line_with_its_status_and_retry_after() {
+        let line = down_line(&Provider::Claude, &failed(Some(429), Some(30), Cause::Refused));
+        println!("{line}");
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.starts_with("energy-translator: Claude reading failed: "), "{line}");
+        assert!(line.contains("Refused") && line.contains("429") && line.contains("30"), "{line}");
     }
     #[test]
     fn claude_missing_window_is_absent() {

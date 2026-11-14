@@ -14,3 +14,18 @@ pub const ETHOS: &str = include_str!("../../../ethos/emission_signal.ethos");
 impl signal::Contracted for Input {
     const CONTRACT_SOURCE: &'static str = ETHOS;
 }
+
+impl Failure {
+    /// A failure with no answer from the provider: no status, no retry-after.
+    pub fn of(cause: Cause) -> Self {
+        Self {
+            cause,
+            status: Status(None),
+            retry_after: RetryAfter(None),
+        }
+    }
+    /// The seconds the provider said to wait, if it said.
+    pub fn retry_after_seconds(&self) -> Option<i64> {
+        self.retry_after.0.as_ref().map(|seconds| seconds.0)
+    }
+}

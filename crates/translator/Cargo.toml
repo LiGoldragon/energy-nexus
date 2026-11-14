@@ -11,7 +11,7 @@ default = ["datom"]
 datom = []
 
 [dependencies]
-energy-nexus-emission={path="../emission"}
+energy-nexus-emission={path="../emission",features=["datom"]}
 energy-nexus-wire={path="../wire"}
 signal-energy-nexus={workspace=true,features=["datom"]}
 signal-flow={workspace=true,features=["datom"]}
