@@ -34,6 +34,13 @@ pub struct Send {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct SendFault {
+    pub recipient: signal_energy_nexus::Recipient,
+    pub provider: signal_energy_nexus::Provider,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Observation {
     Observed(signal_energy_nexus::Reading),
     Down(Failure),
@@ -97,6 +104,7 @@ pub enum Emission {
     CodexConsumeReset(CodexConsumeReset),
     ClaudeUsage(ClaudeUsage),
     Send(Send),
+    SendFault(SendFault),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -106,6 +114,7 @@ pub enum Outcome {
     CodexResetConsumed(Consumption),
     ClaudeUsageObserved(Observation),
     ReminderSent(Delivery),
+    FaultSent(Delivery),
 }
 #[rustfmt::skip]
 pub trait Emitted {
@@ -129,5 +138,9 @@ impl Emitted for ClaudeUsage {
 }
 #[rustfmt::skip]
 impl Emitted for Send {
+    type Outcome = Delivery;
+}
+#[rustfmt::skip]
+impl Emitted for SendFault {
     type Outcome = Delivery;
 }

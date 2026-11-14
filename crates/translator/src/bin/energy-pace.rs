@@ -2,7 +2,7 @@ use datom_codec::{Actualizing, Potential};
 use energy_nexus_translator::cli::ConfiguredPlace;
 use energy_nexus_translator::{TextClienting, Translator};
 use energy_nexus_wire::Place;
-use signal_energy_nexus::{Decimating, Output, Provider, Target};
+use signal_energy_nexus::{Decimating, Output, Provider, Standing, Target};
 
 fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
     let text = match provider {
@@ -44,6 +44,11 @@ fn show(read: signal_energy_nexus::Read_Data) {
             Target::Even => "evenly".into(),
             Target::SpendBy(spend) => format!("{}% by {} hours before the window resets", spend.percent.0, spend.hours.0),
         };
+        // A Session spent out is a fault in the pace of work.
+        let standing = match pace.standing {
+            Standing::Spent => "Spent, a fault in the pace of work".to_string(),
+            other => format!("{other:?}"),
+        };
         println!(
             "{:?} {:?}: {}% used over {}; target {} expects {}% now, counted in useful hours; {:?}. {} hours left, {} useful hours; {}% per useful hour from here.",
             pace.provider,
@@ -52,7 +57,7 @@ fn show(read: signal_energy_nexus::Read_Data) {
             period,
             target,
             pace.expected.0.0,
-            pace.standing,
+            standing,
             pace.hours_left.0.0,
             pace.useful_left.0.float(),
             pace.per_useful_hour.0.float()

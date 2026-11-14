@@ -47,7 +47,7 @@ fn every_live_copy_is_read_whole_and_written_back() {
             assert_eq!(memory.latest_vector, old.latest);
             assert_eq!(memory.configuration().targets.0.len(), old.configuration.targets.len());
             println!(
-                "  version 2: {} readings, {} targets ({:?}), {} window targets carried; schedule empty, baseline 100, zone the system's",
+                "  version 2: {} readings, {} targets ({:?}), {} window targets, dropped by the version 4 upgrade; schedule empty, baseline 100, zone the system's",
                 old.history.len(),
                 old.configuration.targets.len(),
                 old.configuration.targets.iter().map(|target| &target.target).collect::<Vec<_>>(),
@@ -74,12 +74,9 @@ fn every_live_copy_is_read_whole_and_written_back() {
             for target in &old.configuration.window_targets {
                 println!("    {:?} {:?} {:?}", target.provider, target.name, target.target);
             }
-            println!("  version 4 targets after:");
+            println!("  version 4 targets after (a target is the Week window alone):");
             for target in &memory.configuration().targets.0 {
                 println!("    {:?} {:?}", target.provider, target.target);
-            }
-            for target in &memory.configuration().window_targets.0 {
-                println!("    {:?} {:?} {:?}", target.provider, target.name, target.target);
             }
             for held in &carried.uncarried {
                 println!("    logged: energy-nexus: {held}");
@@ -104,14 +101,13 @@ fn every_live_copy_is_read_whole_and_written_back() {
         }
         let windows: usize = memory.history().iter().map(|reading| reading.window_vector.len()).sum();
         println!(
-            "{}: {} bytes, {how}; {latest} latest, {} readings ({windows} windows), {} thresholds, {} reminders, {} targets, {} window targets",
+            "{}: {} bytes, {how}; {latest} latest, {} readings ({windows} windows), {} thresholds, {} reminders, {} targets",
             host.file_name().to_string_lossy(),
             original.len(),
             memory.history().len(),
             memory.configuration().threshold_vector.len(),
             memory.configuration().reminder_vector.len(),
             memory.configuration().targets.0.len(),
-            memory.configuration().window_targets.0.len(),
         );
         let written = scratch.join("written.rkyv");
         memory.save(&written).expect("written back");

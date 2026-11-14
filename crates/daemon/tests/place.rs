@@ -191,7 +191,11 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_served() {
         report.contains("energy-nexus: target Codex SpendBy.{ 1762450320 100 } stated an instant"),
         "the target at an instant is logged with how it was carried"
     );
-    assert!(report.contains("carried as Even: no window of the latest reading holds that instant"));
+    assert!(report.contains("carried as Even: the Week window of the latest reading does not hold that instant"));
+    assert!(
+        report.contains("energy-nexus: window target Claude FableWeek dropped: a target is the Week window alone; it was Even"),
+        "a stored window target is dropped with a log line"
+    );
     let bytes = std::fs::read(shared.place.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
     assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);

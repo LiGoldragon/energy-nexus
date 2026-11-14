@@ -1,13 +1,15 @@
 Operation
-[ signal_energy_nexus:[ Provider Reading Level Reminder Reset Refused ]
+[ signal_energy_nexus:[ Provider Reading Level Reminder Recipient Reset Refused ]
   crate:[ Latest ] ]                                       ; imports the Energy vocabulary and the remembered latest
 [ Reading.Provider                                         ; attempts one live provider reading
   Levelling.Reading                                        ; levels and remembers a reading
   Reminding.{ Reminder Reading }                           ; attempts one configured reminder
+  Faulting.{ Recipient Reading }                           ; attempts to tell one recipient a Session spent out, a fault in the pace of work
   Redeeming.Provider ]                                     ; attempts to redeem one reset
 [ Read.Reading                                             ; outcomes of the attempts above, the n-th the n-th's
   Levelled.LevelChange
   Reminded
+  Faulted
   Redeemed.Reset
   Failed.Refused ]                                         ; any attempt's failure, the Signal's refusal
 [ LevelChange.{ Old.Option<Level> Latest } ]               ; the level before a reading and the latest it made

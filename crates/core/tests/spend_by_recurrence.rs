@@ -1,9 +1,12 @@
 //! A `SpendBy` target is stated against the window's reset: so many hours
-//! before it, a percent of the window spent. It recurs with every reset.
+//! before it, a percent of the window spent. It recurs with every reset. A
+//! target is the Week window alone; the Session takes none, since the session
+//! is a ceiling on the rate of work and a Session spent out is a fault in the
+//! pace.
 
-use energy_nexus_core::{Configuring, Memory, Pacing, Validating};
+use energy_nexus_core::{Configuring, Memory, Pacing, Remembering, Validating};
 use jiff::tz::TimeZone;
-use meta_signal_energy_nexus::{ProviderTarget, Set, WindowTarget};
+use meta_signal_energy_nexus::{ConfigureRefused, ProviderTarget, Set};
 use signal_energy_nexus::{
     Allowed, At, Duration, Hours, Instant, Minutes, Name, Percent, Provider, Reading, Resets,
     SpendBy_Data, Standing, Target, Used, Window,
@@ -119,12 +122,17 @@ fn zero_hours_is_the_reset_itself() {
 }
 
 #[test]
-fn a_window_shorter_than_the_hours_is_paced_evenly() {
-    // 24 hours before the reset: the week has them, the five-hour session does not.
+fn a_target_applies_to_the_week_window_alone() {
+    // 92 percent by 24 hours before the reset: the Week has the target; the
+    // five-hour Session and Claude's FableWeek, whatever the hours, have none.
     let memory = codex_target(spend_by(24, 92));
     let reset = 10 * WEEK;
     let paces = reading(
-        &[(Name::Session, reset - WEEK + 3600, 300), (Name::Week, reset, 10080)],
+        &[
+            (Name::Session, reset - WEEK + 3600, 300),
+            (Name::Week, reset, 10080),
+            (Name::FableWeek, reset, 10080),
+        ],
         30,
         reset - WEEK + 72 * 3600,
     )
@@ -133,17 +141,94 @@ fn a_window_shorter_than_the_hours_is_paced_evenly() {
     assert_eq!(paces[0].target, Target::Even);
     assert_eq!(paces[1].name, Name::Week);
     assert_eq!(paces[1].target, spend_by(24, 92));
+    assert_eq!(paces[2].name, Name::FableWeek);
+    assert_eq!(paces[2].target, Target::Even);
 }
 
 #[test]
-fn a_window_exactly_as_long_as_the_hours_is_paced_by_them() {
+fn a_session_takes_no_target_even_one_it_could_hold() {
+    // Five hours fit the five-hour Session, but a target is the Week's.
     let memory = codex_target(spend_by(5, 100));
     let reset = 10 * WEEK;
     let pace = reading(&[(Name::Session, reset, 300)], 0, reset - 5 * 3600)
         .pace(memory.configuration(), &TimeZone::UTC)
         .remove(0);
-    assert_eq!(pace.target, spend_by(5, 100));
+    assert_eq!(pace.target, Target::Even);
+}
+
+#[test]
+fn a_week_exactly_as_long_as_the_hours_is_paced_by_them() {
+    let memory = codex_target(spend_by(168, 100));
+    let reset = 10 * WEEK;
+    let pace = reading(&[(Name::Week, reset, 10080)], 0, reset - 168 * 3600)
+        .pace(memory.configuration(), &TimeZone::UTC)
+        .remove(0);
+    // The target falls at the week's start: the week is paced by it, not Even.
+    assert_eq!(pace.target, spend_by(168, 100));
     assert_eq!(pace.hours_left.0, Hours(0));
+}
+
+#[test]
+fn a_session_spent_out_is_a_fault_in_the_pace() {
+    let memory = Memory::default();
+    let reset = 10 * WEEK;
+    let standing = |name: Name, used: i64| {
+        reading(&[(name, reset, 300)], used, reset - 3600)
+            .pace(memory.configuration(), &TimeZone::UTC)
+            .remove(0)
+            .standing
+    };
+    assert_eq!(standing(Name::Session, 100), Standing::Spent);
+    assert_ne!(standing(Name::Session, 99), Standing::Spent);
+    assert_eq!(standing(Name::Session, 0), Standing::Under);
+    // A Week used to 100 is a window run past its target, not a fault in the pace.
+    assert_eq!(standing(Name::Week, 100), Standing::Over);
+    assert_eq!(standing(Name::FableWeek, 100), Standing::Over);
+}
+
+#[test]
+fn a_target_of_more_hours_than_the_week_lasts_is_refused_by_the_held_reading() {
+    let mut memory = Memory::default();
+    let target = |hours| {
+        Set::Target(ProviderTarget {
+            provider: Provider::Codex,
+            target: spend_by(hours, 100),
+        })
+    };
+    // No reading is held for Codex, so no Week is known: the target is accepted.
+    memory.configure(target(1000), NOW).expect("no reading held, accepted");
+    memory.remember(reading(
+        &[(Name::Session, 10 * WEEK, 300), (Name::Week, 10 * WEEK, 10080)],
+        10,
+        10 * WEEK - 3600,
+    ));
+    let before = memory.configuration().clone();
+    let refused = ProviderTarget {
+        provider: Provider::Codex,
+        target: spend_by(169, 100),
+    };
+    assert_eq!(
+        memory.configure(target(169), NOW),
+        Err(ConfigureRefused::TargetExceedsWeek(refused)),
+        "169 hours exceed the 168-hour week"
+    );
+    assert_eq!(memory.configuration(), &before, "a refused target changes nothing");
+    memory.configure(target(168), NOW).expect("the whole week is the most");
+    // Claude's week is not Codex's reading: with none held for it, accepted.
+    memory
+        .configure(
+            Set::Target(ProviderTarget {
+                provider: Provider::Claude,
+                target: spend_by(1000, 100),
+            }),
+            NOW,
+        )
+        .expect("no Claude reading is held");
+    // A rule broken is the other refusal, in words.
+    assert!(matches!(
+        memory.configure(target(-1), NOW),
+        Err(ConfigureRefused::RuleRefused(_))
+    ));
 }
 
 #[test]
@@ -153,11 +238,6 @@ fn hours_before_the_reset_are_a_whole_number_from_none_up() {
         Set::Target(ProviderTarget {
             provider: Provider::Codex,
             target: spend_by(-1, 50),
-        }),
-        Set::WindowTarget(WindowTarget {
-            provider: Provider::Codex,
-            name: Name::Week,
-            target: spend_by(-24, 100),
         }),
         Set::Target(ProviderTarget {
             provider: Provider::Codex,

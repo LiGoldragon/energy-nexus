@@ -383,11 +383,6 @@ fn the_schedule_keeps_its_rules() {
             provider: Provider::Codex,
             target: spend_by(-1, 50),
         }),
-        Set::WindowTarget(meta_signal_energy_nexus::WindowTarget {
-            provider: Provider::Codex,
-            name: Name::Week,
-            target: spend_by(-24, 100),
-        }),
     ] {
         assert!(memory.configure(refused.clone(), NOW).is_err(), "{refused:?}");
     }

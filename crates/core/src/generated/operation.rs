@@ -25,10 +25,18 @@ pub struct Reminding_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Faulting_Data {
+    pub recipient: signal_energy_nexus::Recipient,
+    pub reading: signal_energy_nexus::Reading,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Operation {
     Reading(signal_energy_nexus::Provider),
     Levelling(signal_energy_nexus::Reading),
     Reminding(Reminding_Data),
+    Faulting(Faulting_Data),
     Redeeming(signal_energy_nexus::Provider),
 }
 #[rustfmt::skip]
@@ -38,6 +46,7 @@ pub enum Outcome {
     Read(signal_energy_nexus::Reading),
     Levelled(LevelChange),
     Reminded,
+    Faulted,
     Redeemed(signal_energy_nexus::Reset),
     Failed(signal_energy_nexus::Refused),
 }

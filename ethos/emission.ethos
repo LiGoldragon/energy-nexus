@@ -3,15 +3,18 @@ Emission
 [ CodexRateLimits                                          ; one external call per emission, the n-th outcome its own
   CodexConsumeReset
   ClaudeUsage
-  Send ]
+  Send
+  SendFault ]
 [ CodexRateLimitsObserved.Observation                      ; Codex's rate limits, read through its app-server
   CodexResetConsumed.Consumption                           ; one reset consumed, idempotently
   ClaudeUsageObserved.Observation                          ; Claude's usage, read with its credentials
-  ReminderSent.Delivery ]                                  ; one reminder sent through the Flow Nexus client
+  ReminderSent.Delivery                                    ; one reminder sent through the Flow Nexus client
+  FaultSent.Delivery ]                                     ; one Session-spent fault sent through the Flow Nexus client
 [ CodexRateLimits.{}                                       ; carries nothing, so that it bears Emittable
   ClaudeUsage.{}                                           ; carries nothing, so that it bears Emittable
   CodexConsumeReset.{ ResetId Idempotency.String }
   Send.{ Recipient Provider Level }
+  SendFault.{ Recipient Provider }                         ; the provider's Session is spent out: a fault in the pace of work
   Observation.[ Observed.Reading Down.Failure ]            ; what the translator observed, or the provider down and how
   Failure.{ Cause Status.Option<HttpStatus> RetryAfter.Option<Seconds> } ; one failed reading: why, the answer's status, and when the provider said to come back
   Cause.[ Unconfigured                                     ; no program or credentials set

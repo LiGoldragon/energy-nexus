@@ -2,7 +2,7 @@ use datom_codec::{Actualizing, Potential};
 use energy_nexus_emission::{
     Cause, ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission,
     Emittable, Failure, HttpStatus, Input as EmissionInput, Observation, Outcome,
-    Output as EmissionOutput, RetryAfter, Seconds, Send, Status, TurnEnd,
+    Output as EmissionOutput, RetryAfter, Seconds, Send, SendFault, Status, TurnEnd,
 };
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Earlier, Envelope, Framing, MemoryPathing, MemoryRefusal,
@@ -96,6 +96,7 @@ impl Translating for Translator {
             Emission::CodexConsumeReset(value) => Outcome::CodexResetConsumed(value.emit(self)),
             Emission::ClaudeUsage(value) => Outcome::ClaudeUsageObserved(value.emit(self)),
             Emission::Send(value) => Outcome::ReminderSent(value.emit(self)),
+            Emission::SendFault(value) => Outcome::FaultSent(value.emit(self)),
         }
     }
     fn serve(&self) -> std::io::Result<()> {
@@ -313,6 +314,23 @@ impl Emittable<Translator> for Send {
         }
     }
 }
+impl Emittable<Translator> for SendFault {
+    fn emit(&self, translator: &Translator) -> Delivery {
+        let program = translator
+            .programs
+            .lock()
+            .ok()
+            .and_then(|programs| programs.flow_program.0.clone());
+        if program
+            .as_deref()
+            .is_some_and(|program| send_fault(program, &self.recipient, &self.provider))
+        {
+            Delivery::Sent
+        } else {
+            Delivery::Down
+        }
+    }
+}
 impl Translator {
     fn own(&self) -> Vec<std::path::PathBuf> {
         vec![
@@ -474,7 +492,9 @@ impl Translator {
                 return;
             }
             Err(reason) => {
-                let response = meta_signal_energy_nexus::Output::ConfigureRefused(reason);
+                let response = meta_signal_energy_nexus::Output::ConfigureRefused(
+                    meta_signal_energy_nexus::ConfigureRefused::RuleRefused(reason),
+                );
                 let _ = client.write_frame(encode(&response).as_bytes());
                 return;
             }
@@ -776,6 +796,16 @@ fn consume_outcome(value: &Value, reset_id: ResetId) -> Consumption {
         _ => Consumption::Down,
     }
 }
+/// The notice a reminder carries: the provider's level.
+fn reminder_notice(provider: &Provider, level: &Level) -> String {
+    format!("Energy {provider:?} is {level:?}.")
+}
+/// The notice a spent Session carries: the pace of work is the fault.
+fn fault_notice(provider: &Provider) -> String {
+    format!(
+        "Energy {provider:?} Session is spent out: a fault in the pace of work."
+    )
+}
 /// Sends one reminder through the configured Flow client, as Flow's own
 /// typed `Send`, written as its datom.
 fn send_reminder(
@@ -784,12 +814,19 @@ fn send_reminder(
     provider: &Provider,
     level: &Level,
 ) -> bool {
+    send_notice(program, recipient, reminder_notice(provider, level))
+}
+/// Tells one recipient a provider's Session is spent out, the same way.
+fn send_fault(program: &str, recipient: &signal_energy_nexus::Recipient, provider: &Provider) -> bool {
+    send_notice(program, recipient, fault_notice(provider))
+}
+fn send_notice(program: &str, recipient: &signal_energy_nexus::Recipient, notice: String) -> bool {
     use datom_codec::Datomizable;
     use protos::{Compactable, Protosizable};
     let send = signal_flow::Input::Send(signal_flow::SendRequest {
         address: recipient.0.clone(),
         sendable_message: signal_flow::SendableMessage::Soft(signal_flow::SendableRequest::Notice(
-            format!("Energy {provider:?} is {level:?}."),
+            notice,
         )),
     });
     let datom = send.datomize(Vec::new()).protosize().compact();
@@ -995,6 +1032,37 @@ printf '%s\n' "$1" > {}
             signal_flow::Input::Send(send) => assert_eq!(send.address, recipient.0),
             other => panic!("a reminder is a Send, got {other:?}"),
         }
+    }
+    #[test]
+    fn a_spent_session_is_sent_as_a_fault_in_the_pace_of_work() {
+        use std::os::unix::fs::PermissionsExt;
+        let _program = FIXTURE_PROGRAM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("flow-nexus.log");
+        let program = directory.path().join("flow-nexus");
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$1" > {}
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let recipient = signal_energy_nexus::Recipient(signal_energy_nexus::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: signal_flow::Topic("energyNexus".into()),
+            model: signal_flow::Model::Sol,
+        });
+        assert!(send_fault(program.to_str().unwrap(), &recipient, &Provider::Claude));
+        assert_eq!(
+            std::fs::read_to_string(log).unwrap(),
+            "Send.{ { Mind energyNexus Sol } Soft.Notice.«Energy Claude Session is spent out: a fault in the pace of work.» }\n"
+        );
     }
     #[test]
     fn codex_app_server_is_reaped_after_its_answer() {

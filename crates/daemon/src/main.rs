@@ -1,15 +1,18 @@
 mod schedule;
 
-use energy_nexus_core::operation::{Operation, Outcome as OperationOutcome, Reminding_Data};
+use energy_nexus_core::operation::{
+    Faulting_Data, Operation, Outcome as OperationOutcome, Reminding_Data,
+};
 use energy_nexus_core::{
     Configuring, Levelling, Memory, NotCarried, OwnerZone, Pacing, RedeemDecision, Redeeming, Remembering,
-    Reminding,
+    Reminding, SessionFault,
 };
 use energy_nexus_emission::{
     ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission, Failure,
     Idempotency, Input as EmissionInput, Observation, Outcome as ExternalOutcome,
-    Output as EmissionOutput, Send,
+    Output as EmissionOutput, Send, SendFault,
 };
+use meta_signal_energy_nexus::ConfigureRefused;
 use schedule::{Clock, Event, Reads, Schedule, WallClock};
 use energy_nexus_wire::{
     AnnouncesReadiness, Declared, Framing, MemoryPathing, MemoryRefusal, OwnedSockets,
@@ -141,6 +144,16 @@ impl Nexus {
                     _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
                 }
             }
+            Operation::Faulting(Faulting_Data { recipient, reading }) => {
+                let provider = reading.provider;
+                match self.emit(Emission::SendFault(SendFault {
+                    recipient,
+                    provider: provider.clone(),
+                })) {
+                    Ok(ExternalOutcome::FaultSent(Delivery::Sent)) => OperationOutcome::Faulted,
+                    _ => OperationOutcome::Failed(Refused::ProviderDown(provider)),
+                }
+            }
             Operation::Redeeming(provider) => {
                 let now = WallClock::default().unix_now();
                 match self.memory.redeem_decision(&provider, now) {
@@ -210,6 +223,10 @@ impl Acting for Nexus {
         }
         match self.attempt(Operation::Reading(provider.clone())) {
             OperationOutcome::Read(reading) => {
+                let before = self
+                    .memory
+                    .latest(&provider)
+                    .map(|latest| latest.reading.clone());
                 let levelled = self.attempt(Operation::Levelling(reading.clone()));
                 let OperationOutcome::Levelled(change) = levelled else {
                     return match levelled {
@@ -227,6 +244,16 @@ impl Acting for Nexus {
                     for reminder in self.memory.reminders_for(&provider, &change.latest.level) {
                         let _ = self.attempt(Operation::Reminding(Reminding_Data {
                             reminder,
+                            reading: reading.clone(),
+                        }));
+                    }
+                }
+                // A Session spent out is a fault in the pace of work, told once
+                // per session window to whoever a reminder of the provider names.
+                if reading.session_fault_is_new(before.as_ref()) {
+                    for recipient in self.memory.recipients_for(&provider) {
+                        let _ = self.attempt(Operation::Faulting(Faulting_Data {
+                            recipient,
                             reading: reading.clone(),
                         }));
                     }
@@ -364,7 +391,9 @@ impl Serving for Place {
                         reminder.provider, reminder.level, address.aspect, address.topic
                     );
                 }
-                NotCarried::Instant(target) => eprintln!("energy-nexus: {target}"),
+                NotCarried::Instant(_) | NotCarried::WindowTarget(_) => {
+                    eprintln!("energy-nexus: {held}")
+                }
             }
         }
         let own = OwnedSockets(vec![self.public(), self.meta()]);
@@ -487,14 +516,16 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
             match candidate.configure(set, Instant(WallClock::default().unix_now())) {
                 Ok(applied) => match n.commit(candidate) {
                     Ok(()) => meta_signal_energy_nexus::Output::Configured(applied),
-                    Err(refusal) => meta_signal_energy_nexus::Output::ConfigureRefused(format!(
-                        "memory not persisted: {refusal}"
-                    )),
+                    Err(refusal) => meta_signal_energy_nexus::Output::ConfigureRefused(
+                        ConfigureRefused::RuleRefused(format!("memory not persisted: {refusal}")),
+                    ),
                 },
-                Err(reason) => meta_signal_energy_nexus::Output::ConfigureRefused(reason),
+                Err(refused) => meta_signal_energy_nexus::Output::ConfigureRefused(refused),
             }
         }
-        Err(_) => meta_signal_energy_nexus::Output::ConfigureRefused("memory unavailable".into()),
+        Err(_) => meta_signal_energy_nexus::Output::ConfigureRefused(
+            ConfigureRefused::RuleRefused("memory unavailable".into()),
+        ),
     };
     if let Ok(signal) = response.signalize() {
         let _ = stream.write_frame(signal.bytes());
@@ -586,6 +617,8 @@ mod tests {
     struct Translating {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         answer: Arc<Mutex<ExternalOutcome>>,
+        /// The recipient of each Session-spent fault sent, in order.
+        faults: Arc<Mutex<Vec<(Provider, signal_energy_nexus::Recipient)>>>,
     }
     impl Translating {
         fn at(nexus: &Nexus) -> Self {
@@ -595,25 +628,41 @@ mod tests {
             let answer = Arc::new(Mutex::new(ExternalOutcome::CodexRateLimitsObserved(
                 Observation::Down(Failure::of(energy_nexus_emission::Cause::Unreached)),
             )));
-            let (counted, answering) = (Arc::clone(&calls), Arc::clone(&answer));
+            let faults = Arc::new(Mutex::new(Vec::new()));
+            let (counted, answering, told) =
+                (Arc::clone(&calls), Arc::clone(&answer), Arc::clone(&faults));
             std::thread::spawn(move || {
                 for mut stream in listener.incoming().flatten() {
-                    if stream.read_frame().is_err() {
+                    let Ok(bytes) = stream.read_frame() else {
                         continue;
-                    }
+                    };
                     counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let outcome = answering.lock().unwrap().clone();
+                    // A reminder and a fault are delivered; every other call
+                    // is answered with what the test set.
+                    let outcome = match Signal::<EmissionInput>::from(bytes).restore() {
+                        Ok(EmissionInput::Emit(Emission::Send(_))) => {
+                            ExternalOutcome::ReminderSent(Delivery::Sent)
+                        }
+                        Ok(EmissionInput::Emit(Emission::SendFault(fault))) => {
+                            told.lock().unwrap().push((fault.provider, fault.recipient));
+                            ExternalOutcome::FaultSent(Delivery::Sent)
+                        }
+                        _ => answering.lock().unwrap().clone(),
+                    };
                     let signal = EmissionOutput::Emitted(outcome).signalize().unwrap();
                     let _ = stream.write_frame(signal.bytes());
                 }
             });
-            Self { calls, answer }
+            Self { calls, answer, faults }
         }
         fn answers(&self, outcome: ExternalOutcome) {
             *self.answer.lock().unwrap() = outcome;
         }
         fn calls(&self) -> usize {
             self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn faults(&self) -> Vec<(Provider, signal_energy_nexus::Recipient)> {
+            self.faults.lock().unwrap().clone()
         }
     }
 
@@ -738,6 +787,120 @@ mod tests {
         let answer = nexus.read(Provider::Codex);
         assert!(matches!(&answer, Output::Read(read) if read.reading.provider == Provider::Codex));
         assert_eq!(translator.calls(), 2, "Codex was read while Claude waited");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn recipient(topic: &str) -> signal_energy_nexus::Recipient {
+        signal_energy_nexus::Recipient(signal_energy_nexus::Address {
+            aspect: signal_flow::Aspect::Mind,
+            topic: signal_flow::Topic(topic.into()),
+            model: signal_flow::Model::Sol,
+        })
+    }
+
+    /// A Codex reading whose Session is `used`, resetting at `resets`, read at `at`.
+    fn session(used: i64, resets: i64, at: i64) -> Reading {
+        let mut value = reading(5);
+        value.window_vector.insert(
+            0,
+            Window {
+                name: Name::Session,
+                used: signal_energy_nexus::Used(Percent(used)),
+                resets: signal_energy_nexus::Resets(Instant(resets)),
+                duration: signal_energy_nexus::Duration(Minutes(300)),
+            },
+        );
+        value.at = signal_energy_nexus::At(Instant(at));
+        value
+    }
+
+    #[test]
+    fn a_session_spent_out_is_told_once_per_session_window_to_whoever_a_reminder_names() {
+        at(10_000);
+        let root = std::env::temp_dir().join(format!("energy-session-fault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut nexus = nexus(&root);
+        nexus.now = fixed_now;
+        let reminder = |provider, level, topic| signal_energy_nexus::Reminder {
+            provider,
+            level,
+            recipient: recipient(topic),
+        };
+        // Codex's reminders name `watcher` twice (at two levels) and `pacer`
+        // once; Claude's names `other`, which a Codex fault does not reach.
+        nexus.memory.configuration.reminder_vector = vec![
+            reminder(Provider::Codex, signal_energy_nexus::Level::Low, "watcher"),
+            reminder(Provider::Codex, signal_energy_nexus::Level::Out, "watcher"),
+            reminder(Provider::Codex, signal_energy_nexus::Level::Out, "pacer"),
+            reminder(Provider::Claude, signal_energy_nexus::Level::Out, "other"),
+        ];
+        let translator = Translating::at(&nexus);
+        let observe = |reading: Reading| {
+            translator.answers(ExternalOutcome::CodexRateLimitsObserved(Observation::Observed(reading)));
+        };
+        let told = |count: usize| {
+            let faults = translator.faults();
+            assert_eq!(faults.len(), count, "{faults:?}");
+        };
+        // A session with room: nothing to tell.
+        observe(session(40, 12_000, 10_000));
+        let answer = nexus.read(Provider::Codex);
+        assert!(matches!(&answer, Output::Read(read)
+            if read.pace_vector[0].name == Name::Session
+                && read.pace_vector[0].standing != signal_energy_nexus::Standing::Spent));
+        told(0);
+        // It runs out: the Pace says Spent, and each recipient is told once.
+        observe(session(100, 12_000, 10_100));
+        let answer = nexus.read(Provider::Codex);
+        assert!(matches!(&answer, Output::Read(read)
+            if read.pace_vector[0].standing == signal_energy_nexus::Standing::Spent), "{answer:?}");
+        let faults = translator.faults();
+        assert_eq!(
+            faults,
+            vec![
+                (Provider::Codex, recipient("watcher")),
+                (Provider::Codex, recipient("pacer")),
+            ],
+            "whoever a Codex reminder names, each once"
+        );
+        // Read again in the same session window: not told again.
+        observe(session(100, 12_000, 10_200));
+        nexus.read(Provider::Codex);
+        told(2);
+        // The window resets without a reading, and the next is spent again:
+        // a new session window, told again.
+        at(12_500);
+        observe(session(100, 30_000, 12_500));
+        nexus.read(Provider::Codex);
+        told(4);
+        // Room again, then spent out again: told again.
+        observe(session(10, 30_000, 13_000));
+        nexus.read(Provider::Codex);
+        told(4);
+        observe(session(100, 30_000, 13_100));
+        nexus.read(Provider::Codex);
+        told(6);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_week_used_to_100_is_no_fault_in_the_pace_and_tells_no_one() {
+        at(10_000);
+        let root = std::env::temp_dir().join(format!("energy-week-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut nexus = nexus(&root);
+        nexus.now = fixed_now;
+        nexus.memory.configuration.reminder_vector = vec![signal_energy_nexus::Reminder {
+            provider: Provider::Codex,
+            level: signal_energy_nexus::Level::Out,
+            recipient: recipient("watcher"),
+        }];
+        let translator = Translating::at(&nexus);
+        let mut full = session(40, 12_000, 10_000);
+        full.window_vector[1].used = signal_energy_nexus::Used(Percent(100));
+        translator.answers(ExternalOutcome::CodexRateLimitsObserved(Observation::Observed(full)));
+        nexus.read(Provider::Codex);
+        assert!(translator.faults().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

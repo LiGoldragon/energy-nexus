@@ -10,7 +10,7 @@ use energy_nexus_core::{
     RedeemExpiring, RedeemUsedAtLeast, Remembering,
 };
 use energy_nexus_wire::{Admission, Earlier, MemoryRefusal, Persisted};
-use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
+use meta_signal_energy_nexus::ProviderTarget;
 use signal_energy_nexus::{Instant, Level, Minutes, Name, Percent, Provider, Target, Threshold};
 
 struct Root(PathBuf);
@@ -166,14 +166,6 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
         provider: Provider::Codex,
         target: Target::Even,
     }));
-    assert_eq!(
-        configuration.window_targets.0,
-        vec![WindowTarget {
-            provider: Provider::Claude,
-            name: Name::FableWeek,
-            target: Target::Even,
-        }]
-    );
     assert!(configuration.reminder_vector.is_empty());
     assert_eq!(memory.history().len(), 3);
     let claude = memory.latest(&Provider::Claude).expect("Claude's latest");
@@ -187,8 +179,10 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
             "Codex Low { Mind energyNexus Secondary }",
             "Claude Out { Psyche core Primary }",
             "target Codex SpendBy.{ 1762450320 100 } stated an instant, which a target stated \
-             against the window's reset has no place for; carried as Even: no window of the \
-             latest reading holds that instant"
+             against the window's reset has no place for; carried as Even: the Week window of \
+             the latest reading does not hold that instant",
+            "window target Claude FableWeek dropped: a target is the Week window alone; it was \
+             Even"
         ]
     );
     written_in_the_envelope(&root, &memory);
@@ -493,7 +487,12 @@ fn format_version_two_is_carried_whole_into_an_empty_schedule() {
     std::fs::write(root.memory(), version_two_file()).unwrap();
     let memory = match Memory::load(&root.memory()).expect("format version 2 opens") {
         Admission::Upgraded(Earlier::Version(2), upgrade) => {
-            assert_eq!(upgrade.uncarried.len(), 1, "the one instant, carried as hours");
+            assert_eq!(
+                upgrade.uncarried.len(),
+                2,
+                "the one instant, carried as hours, and the one window target, dropped"
+            );
+            assert!(matches!(upgrade.uncarried[1], NotCarried::WindowTarget(_)));
             upgrade.memory
         }
         other => panic!("format version 2 is upgraded, got {other:?}"),
@@ -513,7 +512,6 @@ fn format_version_two_is_carried_whole_into_an_empty_schedule() {
         }],
         "an earlier SpendBy spends the whole window, now 15 hours before the week's reset (54860 seconds)"
     );
-    assert_eq!(configuration.window_targets.0.len(), 1);
     assert!(configuration.schedule.0.is_empty());
     assert!(configuration.override_vector.is_empty());
     assert_eq!(configuration.time_zone_option, None, "the system's zone");
@@ -670,7 +668,7 @@ fn spend_by(hours: i64, percent: i64) -> Target {
 }
 
 #[test]
-fn format_version_three_carries_each_instant_as_the_hours_before_its_windows_reset() {
+fn format_version_three_carries_each_provider_instant_as_hours_before_the_week_resets_and_drops_window_targets() {
     let root = Root::new("version-three");
     std::fs::write(root.memory(), version_three_file()).unwrap();
     let (memory, uncarried) = match Memory::load(&root.memory()).expect("format version 3 opens") {
@@ -691,36 +689,12 @@ fn format_version_three_carries_each_instant_as_the_hours_before_its_windows_res
             },
         ]
     );
-    assert_eq!(
-        configuration.window_targets.0,
-        vec![
-            WindowTarget {
-                provider: Provider::Codex,
-                name: Name::Session,
-                target: spend_by(2, 50),
-            },
-            WindowTarget {
-                provider: Provider::Codex,
-                name: Name::FableWeek,
-                target: Target::Even,
-            },
-            WindowTarget {
-                provider: Provider::Codex,
-                name: Name::Week,
-                target: Target::Even,
-            },
-            WindowTarget {
-                provider: Provider::Claude,
-                name: Name::Week,
-                target: Target::Even,
-            },
-        ]
-    );
     let carries: Vec<_> = uncarried
         .iter()
-        .map(|held| match held {
-            NotCarried::Instant(target) => target.carry.clone(),
-            other => panic!("only instants are listed, got {other:?}"),
+        .filter_map(|held| match held {
+            NotCarried::Instant(target) => Some(target.carry.clone()),
+            NotCarried::WindowTarget(_) => None,
+            other => panic!("only instants and window targets are listed, got {other:?}"),
         })
         .collect();
     assert_eq!(
@@ -728,19 +702,28 @@ fn format_version_three_carries_each_instant_as_the_hours_before_its_windows_res
         vec![
             Carry::Hours {
                 hours: signal_energy_nexus::Hours(24),
-                window: Name::Week,
                 resets: Instant(1795054860),
             },
             Carry::NoReading,
-            Carry::Hours {
-                hours: signal_energy_nexus::Hours(2),
-                window: Name::Session,
-                resets: Instant(1794628200),
-            },
-            Carry::NoWindow,
-            Carry::NoWindow,
         ],
-        "each stored target at an instant is listed, in the order stored, provider targets first"
+        "each stored provider target at an instant is listed, in the order stored; a provider \
+         target is the Week window's, so an instant is read against the Week alone"
+    );
+    // Every stored window target is dropped, and listed: a target is the Week
+    // window alone.
+    let dropped: Vec<_> = uncarried
+        .iter()
+        .filter(|held| matches!(held, NotCarried::WindowTarget(_)))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        dropped,
+        vec![
+            "window target Codex Session dropped: a target is the Week window alone; it was SpendBy.{ 1794620400 50 }",
+            "window target Codex FableWeek dropped: a target is the Week window alone; it was SpendBy.{ 1794968460 100 }",
+            "window target Codex Week dropped: a target is the Week window alone; it was SpendBy.{ 1797646860 100 }",
+            "window target Claude Week dropped: a target is the Week window alone; it was Even",
+        ]
     );
     assert_eq!(
         uncarried[0].to_string(),

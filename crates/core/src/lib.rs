@@ -12,11 +12,11 @@ mod usefulness;
 pub use usefulness::{ScheduleChecking, SpanReading, UsefulTime};
 
 use energy_nexus_wire::{Earlier, Envelope, Persisted, Upgrade};
-use meta_signal_energy_nexus::{ProviderTarget, Set};
+use meta_signal_energy_nexus::{ConfigureRefused, ProviderTarget, Set};
 use signal_energy_nexus::{
-    Baseline, Expected, Hours, HoursLeft, Instant, Left, Level, Minutes, Pace, PerUsefulHour,
-    Percent, Provider, Reading, Reminder, Reset, ResetStatus, Standing, Target, Threshold,
-    UsefulLeft, Used,
+    Baseline, Expected, Hours, HoursLeft, Instant, Left, Level, Minutes, Name, Pace, PerUsefulHour,
+    Percent, Provider, Reading, Recipient, Reminder, Reset, ResetStatus, Standing, Target,
+    Threshold, UsefulLeft, Used,
 };
 
 impl Default for Configuration {
@@ -49,7 +49,6 @@ impl Default for Configuration {
                     target: Target::Even,
                 },
             ]),
-            window_targets: WindowTargets(Vec::new()),
             schedule: Schedule(Vec::new()),
             override_vector: Vec::new(),
             baseline: Baseline(Percent(100)),
@@ -115,9 +114,6 @@ impl Validating for Configuration {
             }
         }
         for target in &self.targets.0 {
-            target.target.validate()?;
-        }
-        for target in &self.window_targets.0 {
             target.target.validate()?;
         }
         for span in &self.schedule.0 {
@@ -496,45 +492,36 @@ pub mod version3 {
         pub time_zone: Option<TimeZone>,
     }
 
-    /// Where a target at an instant falls in the latest reading held for its
-    /// provider. A window target names its window; a provider target is
-    /// carried by the longest window (the earliest listed of equals) whose
-    /// span, from its start to its reset, holds the instant. The hours are the
-    /// reset less the instant, rounded to the hour; the instant must fall
-    /// within the window, hours from none to the window's duration.
-    fn carry(
-        latest: &[super::Latest],
-        provider: &Provider,
-        window: Option<&Name>,
-        spend: &SpendBy,
-    ) -> Carry {
+    /// Where a target at an instant falls in the Week window of the latest
+    /// reading held for its provider: a target is the Week window alone. The
+    /// hours are the reset less the instant, rounded to the hour; the instant
+    /// must fall within the window, hours from none to the window's duration.
+    fn carry(latest: &[super::Latest], provider: &Provider, spend: &SpendBy) -> Carry {
         let Some(held) = latest.iter().find(|held| &held.provider == provider) else {
             return Carry::NoReading;
         };
-        let mut windows: Vec<_> = held
+        let Some(week) = held
             .reading
             .window_vector
             .iter()
-            .filter(|candidate| window.map_or(true, |name| &candidate.name == name))
-            .collect();
-        windows.sort_by_key(|candidate| std::cmp::Reverse(candidate.duration.0 .0));
-        for candidate in windows {
-            let seconds = candidate.resets.0 .0 - spend.instant.0;
-            let hours = (seconds + 1_800).div_euclid(3_600);
-            if (0..=candidate.duration.0 .0 / 60).contains(&hours) {
-                return Carry::Hours {
-                    hours: Hours(hours),
-                    window: candidate.name.clone(),
-                    resets: candidate.resets.0,
-                };
+            .find(|candidate| candidate.name == Name::Week)
+        else {
+            return Carry::NoWindow;
+        };
+        let seconds = week.resets.0 .0 - spend.instant.0;
+        let hours = (seconds + 1_800).div_euclid(3_600);
+        if (0..=week.duration.0 .0 / 60).contains(&hours) {
+            Carry::Hours {
+                hours: Hours(hours),
+                resets: week.resets.0,
             }
+        } else {
+            Carry::NoWindow
         }
-        Carry::NoWindow
     }
     fn carried(
         latest: &[super::Latest],
         provider: &Provider,
-        window: Option<&Name>,
         target: Target,
         uncarried: &mut Vec<NotCarried>,
     ) -> signal_energy_nexus::Target {
@@ -542,7 +529,7 @@ pub mod version3 {
             Target::Even => return signal_energy_nexus::Target::Even,
             Target::SpendBy(spend) => spend,
         };
-        let how = carry(latest, provider, window, &spend);
+        let how = carry(latest, provider, &spend);
         let carried = match &how {
             Carry::Hours { hours, .. } => signal_energy_nexus::Target::SpendBy(SpendBy_Data {
                 hours: hours.clone(),
@@ -552,7 +539,6 @@ pub mod version3 {
         };
         uncarried.push(NotCarried::Instant(InstantTarget {
             provider: provider.clone(),
-            window: window.cloned(),
             instant: spend.instant,
             percent: spend.percent,
             carry: how,
@@ -560,9 +546,11 @@ pub mod version3 {
         carried
     }
     /// Every reading, level, threshold, reminder, schedule and setting is
-    /// carried as it was. A target at an instant is carried as the hours
-    /// before the reset of the window the latest reading for its provider
-    /// holds, else as `Even`; each is listed as not carried as it stood.
+    /// carried as it was. A provider target at an instant is carried as the
+    /// hours before the reset of the Week window the latest reading for its
+    /// provider holds, else as `Even`; each is listed as not carried as it
+    /// stood. A window target has no place in version 4, where a target is the
+    /// Week window alone: it is dropped and listed.
     impl From<Memory> for super::Upgrade<super::Memory> {
         fn from(old: Memory) -> Self {
             let mut uncarried = Vec::new();
@@ -574,7 +562,6 @@ pub mod version3 {
                     let target = carried(
                         &old.latest,
                         &configured.provider,
-                        None,
                         configured.target,
                         &mut uncarried,
                     );
@@ -584,24 +571,9 @@ pub mod version3 {
                     }
                 })
                 .collect();
-            let window_targets = configuration
-                .window_targets
-                .into_iter()
-                .map(|configured| {
-                    let target = carried(
-                        &old.latest,
-                        &configured.provider,
-                        Some(&configured.name),
-                        configured.target,
-                        &mut uncarried,
-                    );
-                    meta_signal_energy_nexus::WindowTarget {
-                        provider: configured.provider,
-                        name: configured.name,
-                        target,
-                    }
-                })
-                .collect();
+            for dropped in configuration.window_targets {
+                uncarried.push(NotCarried::WindowTarget(dropped));
+            }
             let memory = super::Memory {
                 latest_vector: old.latest,
                 history: super::History(old.history),
@@ -613,7 +585,6 @@ pub mod version3 {
                         configuration.redeem_used_at_least,
                     ),
                     targets: super::Targets(targets),
-                    window_targets: super::WindowTargets(window_targets),
                     schedule: super::Schedule(configuration.schedule),
                     override_vector: configuration.overrides,
                     baseline: configuration.baseline,
@@ -634,12 +605,28 @@ pub enum NotCarried {
     /// A target at an instant, carried as the hours before a reset or as
     /// `Even`.
     Instant(InstantTarget),
+    /// A window target, which version 4 has no place for: a target is the
+    /// Week window alone. It is dropped.
+    WindowTarget(version3::WindowTarget),
 }
 impl std::fmt::Display for NotCarried {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Reminder(reminder) => reminder.fmt(formatter),
             Self::Instant(target) => target.fmt(formatter),
+            Self::WindowTarget(target) => {
+                write!(
+                    formatter,
+                    "window target {:?} {:?} dropped: a target is the Week window alone; it was ",
+                    target.provider, target.name
+                )?;
+                match &target.target {
+                    version3::Target::Even => write!(formatter, "Even"),
+                    version3::Target::SpendBy(spend) => {
+                        write!(formatter, "SpendBy.{{ {} {} }}", spend.instant.0, spend.percent.0)
+                    }
+                }
+            }
         }
     }
 }
@@ -647,8 +634,6 @@ impl std::fmt::Display for NotCarried {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstantTarget {
     pub provider: Provider,
-    /// The window a window target names; none for a provider target.
-    pub window: Option<signal_energy_nexus::Name>,
     pub instant: Instant,
     pub percent: Percent,
     pub carry: Carry,
@@ -656,38 +641,31 @@ pub struct InstantTarget {
 /// How a target at an instant was carried.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Carry {
-    /// As the hours before the reset of this window.
-    Hours {
-        hours: Hours,
-        window: signal_energy_nexus::Name,
-        resets: Instant,
-    },
+    /// As the hours before the reset of the Week window.
+    Hours { hours: Hours, resets: Instant },
     /// As `Even`: no reading is held for the provider, so no reset is known.
     NoReading,
-    /// As `Even`: no window of the latest reading holds the instant.
+    /// As `Even`: the Week window of the latest reading does not hold the instant.
     NoWindow,
 }
 impl std::fmt::Display for InstantTarget {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "target {:?}", self.provider)?;
-        if let Some(window) = &self.window {
-            write!(formatter, " {window:?}")?;
-        }
         write!(
             formatter,
             " SpendBy.{{ {} {} }} stated an instant, which a target stated against the window's reset has no place for; carried as ",
             self.instant.0, self.percent.0
         )?;
         match &self.carry {
-            Carry::Hours { hours, window, resets } => write!(
+            Carry::Hours { hours, resets } => write!(
                 formatter,
-                "SpendBy.{{ {} {} }}: the {window:?} window resets at {}",
+                "SpendBy.{{ {} {} }}: the Week window resets at {}",
                 hours.0, self.percent.0, resets.0
             ),
             Carry::NoReading => write!(formatter, "Even: no reading is held for the provider"),
             Carry::NoWindow => write!(
                 formatter,
-                "Even: no window of the latest reading holds that instant"
+                "Even: the Week window of the latest reading does not hold that instant"
             ),
         }
     }
@@ -712,23 +690,18 @@ impl Pacing for Reading {
         self.window_vector
             .iter()
             .map(|window| {
-                let target = configuration
-                    .window_targets
-                    .0
-                    .iter()
-                    .find(|configured| {
-                        configured.provider == self.provider && configured.name == window.name
-                    })
-                    .map(|configured| configured.target.clone())
-                    .or_else(|| {
-                        configuration
-                            .targets
-                            .0
-                            .iter()
-                            .find(|configured| configured.provider == self.provider)
-                            .map(|configured| configured.target.clone())
-                    })
-                    .unwrap_or(Target::Even);
+                // A target is the Week window alone; every other window, the
+                // Session and Claude's FableWeek, is paced evenly.
+                let target = match window.name {
+                    Name::Week => configuration
+                        .targets
+                        .0
+                        .iter()
+                        .find(|configured| configured.provider == self.provider)
+                        .map(|configured| configured.target.clone())
+                        .unwrap_or(Target::Even),
+                    Name::Session | Name::FableWeek => Target::Even,
+                };
                 let used = window.used.0.0.clamp(0, 100);
                 let start = window.resets.0.0 - window.duration.0.0 * 60;
                 // The instant the target ends at and how much of the window
@@ -771,7 +744,10 @@ impl Pacing for Reading {
                     target,
                     expected: Expected(Percent(expected)),
                     used: Used(Percent(used)),
+                    // The session is a ceiling on the rate of work: spent out,
+                    // it is a fault in the pace, whatever it was expected to be.
                     standing: match used.cmp(&expected) {
+                        _ if window.name == Name::Session && used >= 100 => Standing::Spent,
                         std::cmp::Ordering::Greater => Standing::Over,
                         std::cmp::Ordering::Less => Standing::Under,
                         std::cmp::Ordering::Equal => Standing::On,
@@ -782,6 +758,37 @@ impl Pacing for Reading {
                 }
             })
             .collect()
+    }
+}
+
+/// A reading whose Session window is spent out.
+pub trait SessionSpending {
+    /// The Session window the reading holds, when it is used to 100 percent:
+    /// a fault in the pace of work.
+    fn session_spent(&self) -> Option<&signal_energy_nexus::Window>;
+}
+impl SessionSpending for Reading {
+    fn session_spent(&self) -> Option<&signal_energy_nexus::Window> {
+        self.window_vector
+            .iter()
+            .find(|window| window.name == Name::Session && window.used.0 .0 >= 100)
+    }
+}
+/// Whether a reading's spent Session is the one the reading before it already
+/// held spent: the earlier reading's window had not yet reset when this one
+/// was taken, so both are one session window, told once.
+pub trait SessionFault {
+    fn session_fault_is_new(&self, before: Option<&Reading>) -> bool;
+}
+impl SessionFault for Reading {
+    fn session_fault_is_new(&self, before: Option<&Reading>) -> bool {
+        if self.session_spent().is_none() {
+            return false;
+        }
+        match before.and_then(SessionSpending::session_spent) {
+            Some(window) => window.resets.0 .0 <= self.at.0 .0,
+            None => true,
+        }
     }
 }
 
@@ -863,32 +870,57 @@ impl Remembering for Memory {
 pub trait Configuring {
     /// Applies one setting at `now`; a change of the schedule removes every
     /// override whose Until has passed.
-    fn configure(&mut self, set: Set, now: Instant) -> Result<Set, String>;
+    fn configure(&mut self, set: Set, now: Instant) -> Result<Set, ConfigureRefused>;
     fn configuration(&self) -> &Configuration;
 }
+/// A refusal in words.
+fn rule(words: impl Into<String>) -> ConfigureRefused {
+    ConfigureRefused::RuleRefused(words.into())
+}
 impl Configuring for Memory {
-    fn configure(&mut self, set: Set, now: Instant) -> Result<Set, String> {
+    fn configure(&mut self, set: Set, now: Instant) -> Result<Set, ConfigureRefused> {
         match &set {
             Set::RedeemExpiring(value) if value.0 <= 0 => {
-                return Err("minutes must be positive".into())
+                return Err(rule("minutes must be positive"))
             }
             Set::RedeemUsedAtLeast(value) if !(0..=100).contains(&value.0) => {
-                return Err("percent must be between 0 and 100".into())
+                return Err(rule("percent must be between 0 and 100"))
             }
             Set::Threshold(value)
                 if value.level == Level::Out || !(0..=100).contains(&value.left.0.0) =>
             {
-                return Err(
-                    "Out follows provider allowance; threshold percent must be between 0 and 100"
-                        .into(),
-                )
+                return Err(rule(
+                    "Out follows provider allowance; threshold percent must be between 0 and 100",
+                ))
             }
-            Set::Target(value) => value.target.validate()?,
-            Set::WindowTarget(value) => value.target.validate()?,
-            Set::Span(span) | Set::RemoveSpan(span) => span.check()?,
-            Set::Override(stretch) | Set::RemoveOverride(stretch) => stretch.check()?,
-            Set::Baseline(baseline) => baseline.check()?,
-            Set::TimeZone(zone) => zone.validate()?,
+            Set::Target(value) => {
+                value.target.validate().map_err(rule)?;
+                // A target of more hours than the Week window lasts: refused
+                // by the Week window the held reading names; with no reading
+                // held the target is accepted, and paced evenly in a window
+                // too short for it.
+                if let Target::SpendBy(spend) = &value.target {
+                    let week = self
+                        .latest(&value.provider)
+                        .and_then(|latest| {
+                            latest
+                                .reading
+                                .window_vector
+                                .iter()
+                                .find(|window| window.name == Name::Week)
+                        })
+                        .map(|window| window.duration.0 .0 / 60);
+                    if week.is_some_and(|hours| spend.hours.0 > hours) {
+                        return Err(ConfigureRefused::TargetExceedsWeek(value.clone()));
+                    }
+                }
+            }
+            Set::Span(span) | Set::RemoveSpan(span) => span.check().map_err(rule)?,
+            Set::Override(stretch) | Set::RemoveOverride(stretch) => {
+                stretch.check().map_err(rule)?
+            }
+            Set::Baseline(baseline) => baseline.check().map_err(rule)?,
+            Set::TimeZone(zone) => zone.validate().map_err(rule)?,
             _ => {}
         }
         let set = match set {
@@ -935,13 +967,6 @@ impl Configuring for Memory {
                     .retain(|known| known.provider != value.provider);
                 self.configuration.targets.0.push(value)
             }
-            Set::WindowTarget(value) => {
-                self.configuration
-                    .window_targets
-                    .0
-                    .retain(|known| known.provider != value.provider || known.name != value.name);
-                self.configuration.window_targets.0.push(value)
-            }
             Set::Span(value) => {
                 if !self.configuration.schedule.0.contains(&value) {
                     self.configuration.schedule.0.push(value)
@@ -959,7 +984,7 @@ impl Configuring for Memory {
             Set::Baseline(value) => self.configuration.baseline = value,
             Set::TimeZone(value) => self.configuration.time_zone_option = Some(value),
             Set::Program(_) | Set::Credentials(_) => {
-                return Err("translator configuration belongs to the translator".into())
+                return Err(rule("translator configuration belongs to the translator"))
             }
         }
         if schedule_changes {
@@ -1015,6 +1040,9 @@ impl Redeeming for Memory {
 }
 pub trait Reminding {
     fn reminders_for(&self, provider: &Provider, level: &Level) -> Vec<Reminder>;
+    /// Whoever a reminder of the provider names, each once, at any level: the
+    /// ones told a fault in the pace.
+    fn recipients_for(&self, provider: &Provider) -> Vec<Recipient>;
 }
 impl Reminding for Memory {
     fn reminders_for(&self, provider: &Provider, level: &Level) -> Vec<Reminder> {
@@ -1025,12 +1053,20 @@ impl Reminding for Memory {
             .cloned()
             .collect()
     }
+    fn recipients_for(&self, provider: &Provider) -> Vec<Recipient> {
+        let mut recipients: Vec<Recipient> = Vec::new();
+        for reminder in &self.configuration.reminder_vector {
+            if &reminder.provider == provider && !recipients.contains(&reminder.recipient) {
+                recipients.push(reminder.recipient.clone());
+            }
+        }
+        recipients
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use energy_nexus_wire::{Admission, MemoryRefusal};
-    use meta_signal_energy_nexus::WindowTarget;
     use signal_energy_nexus::{Allowed, At, Duration, Expires, Instant, Name, Resets, Window};
 
     fn spend_by(hours: i64) -> Target {
@@ -1119,26 +1155,32 @@ mod tests {
         assert_eq!(value.next_reset(), None);
     }
     #[test]
-    fn window_target_overrides_provider_default() {
+    fn a_target_applies_to_the_week_window_alone() {
         let mut value = reading(true, 40);
-        value.window_vector.push(Window {
-            name: Name::FableWeek,
-            used: Used(Percent(60)),
-            resets: Resets(Instant(200)),
-            duration: Duration(Minutes(10080)),
-        });
+        for (name, used, duration) in [
+            (Name::FableWeek, 60, 10080),
+            (Name::Session, 30, 300),
+        ] {
+            value.window_vector.push(Window {
+                name,
+                used: Used(Percent(used)),
+                resets: Resets(Instant(200)),
+                duration: Duration(Minutes(duration)),
+            });
+        }
         let mut configuration = Configuration::default();
-        configuration.window_targets = WindowTargets(vec![WindowTarget {
+        configuration.targets = Targets(vec![ProviderTarget {
             provider: Provider::Codex,
-            name: Name::FableWeek,
             target: spend_by(24),
         }]);
         let pace = value.pace(&configuration, &jiff::tz::TimeZone::UTC);
-        assert_eq!(pace.len(), 2);
+        assert_eq!(pace.len(), 3);
         assert_eq!(pace[0].name, Name::Week);
-        assert_eq!(pace[0].target, Target::Even);
+        assert_eq!(pace[0].target, spend_by(24));
         assert_eq!(pace[1].name, Name::FableWeek);
-        assert_eq!(pace[1].target, spend_by(24));
+        assert_eq!(pace[1].target, Target::Even);
+        assert_eq!(pace[2].name, Name::Session);
+        assert_eq!(pace[2].target, Target::Even);
     }
     #[test]
     fn memory_survives_a_restart() {
