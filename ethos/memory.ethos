@@ -1,6 +1,6 @@
 Memory
 [ signal_energy_nexus:[ Provider Reading Level Threshold Reminder Minutes Percent ProviderTarget WindowTarget Span Override Baseline TimeZone ] ] ; imports the Energy vocabulary
-[ Memory.{ Vector<Latest> History Configuration }         ; the stored root of energy.rkyv, format version 3
+[ Memory.{ Vector<Latest> History Configuration }         ; the stored root of energy.rkyv, format version 4
   Latest.{ Provider Reading Level }                        ; the latest observation and level for one provider
   History.Vector<Reading>                                  ; every reading, in the order taken
   Configuration.{ Vector<Threshold> Vector<Reminder> RedeemExpiring.Minutes RedeemUsedAtLeast.Percent Targets.Vector<ProviderTarget> WindowTargets.Vector<WindowTarget> ; the Nexus policy state

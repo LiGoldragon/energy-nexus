@@ -99,9 +99,10 @@ fn week(provider: Provider, used: i64, resets: i64, at: i64) -> Reading {
     }
 }
 
-fn spend_by(instant: i64, percent: i64) -> Target {
+/// A target spending `percent` of the window `hours` before it resets.
+fn spend_by(hours: i64, percent: i64) -> Target {
     Target::SpendBy(SpendBy_Data {
-        instant: Instant(instant),
+        hours: Hours(hours),
         percent: Percent(percent),
     })
 }
@@ -328,26 +329,27 @@ fn a_window_whose_every_hour_counts_nothing_counts_time_plainly() {
 }
 
 #[test]
-fn a_spend_by_target_counts_its_useful_hours_to_the_instant() {
+fn a_spend_by_target_counts_its_useful_hours_to_so_many_hours_before_the_reset() {
     let memory = configured(every_day_eight_to_ten());
     let mut reading = codex_week();
     reading.window_vector[0].used = Used(Percent(92));
-    // Spend the week whole by Sunday 15 November, 20:00.
-    let by = local("2026-11-15T20:00");
+    // Spend the week whole 72 hours before it resets, Sunday 15 November, 20:21.
+    assert_eq!(local("2026-11-18T20:21") - 72 * 3600, local("2026-11-15T20:21"));
     let mut memory = memory;
     memory
         .configure(
             Set::Target(meta_signal_energy_nexus::ProviderTarget {
                 provider: Provider::Codex,
-                target: spend_by(by, 100),
+                target: spend_by(72, 100),
             }),
             NOW,
         )
         .unwrap();
     let pace = reading.pace(memory.configuration(), &zone()).remove(0);
-    // 13 Nov 16:50 to 15 Nov 20:00: 51.17 hours; 5.17 + 2 + 14 + 2 + 12 useful.
-    assert_eq!(pace.hours_left.0, Hours(51));
-    assert_eq!(pace.useful_left.0, decimal(35.2));
+    // 13 Nov 16:50 to 15 Nov 20:21: 51.52 hours; 5.17 + 2 + 14 + 2 + 12.35 useful.
+    assert_eq!(pace.target, spend_by(72, 100));
+    assert_eq!(pace.hours_left.0, Hours(52));
+    assert_eq!(pace.useful_left.0, decimal(35.5));
     assert_eq!(pace.per_useful_hour.0, decimal(0.23));
     assert_eq!(pace.standing, Standing::Over);
 }
@@ -375,7 +377,16 @@ fn the_schedule_keeps_its_rules() {
         Set::TimeZone(signal_energy_nexus::TimeZone("Nowhere/Atlantis".into())),
         Set::Target(meta_signal_energy_nexus::ProviderTarget {
             provider: Provider::Codex,
-            target: spend_by(1795000000, 101),
+            target: spend_by(72, 101),
+        }),
+        Set::Target(meta_signal_energy_nexus::ProviderTarget {
+            provider: Provider::Codex,
+            target: spend_by(-1, 50),
+        }),
+        Set::WindowTarget(meta_signal_energy_nexus::WindowTarget {
+            provider: Provider::Codex,
+            name: Name::Week,
+            target: spend_by(-24, 100),
         }),
     ] {
         assert!(memory.configure(refused.clone(), NOW).is_err(), "{refused:?}");
@@ -416,13 +427,12 @@ fn a_span_is_one_span_whatever_order_its_days_are_named_in() {
 }
 
 #[test]
-fn a_target_short_of_whole_expects_its_share_by_its_instant() {
-    // Half the week spent by Sunday 15 November, 20:00, 30% used so far.
-    let by = local("2026-11-15T20:00");
+fn a_target_short_of_whole_expects_its_share_by_its_hours_before_the_reset() {
+    // Half the week spent 72 hours before it resets, 30% used so far.
     let mut sets = every_day_eight_to_ten();
     sets.push(Set::Target(meta_signal_energy_nexus::ProviderTarget {
         provider: Provider::Codex,
-        target: spend_by(by, 50),
+        target: spend_by(72, 50),
     }));
     let memory = configured(sets);
     let mut reading = codex_week();
@@ -432,7 +442,7 @@ fn a_target_short_of_whole_expects_its_share_by_its_instant() {
         let mut sets = every_day_eight_to_ten();
         sets.push(Set::Target(meta_signal_energy_nexus::ProviderTarget {
             provider: Provider::Codex,
-            target: spend_by(by, 100),
+            target: spend_by(72, 100),
         }));
         reading.pace(configured(sets).configuration(), &zone()).remove(0)
     };
@@ -442,7 +452,7 @@ fn a_target_short_of_whole_expects_its_share_by_its_instant() {
     assert_eq!(pace.useful_left, whole.useful_left);
     assert_eq!(whole.expected.0.0, 45);
     assert_eq!(pace.expected.0.0, 22, "half of the useful time's share, 45 of 100 for the whole");
-    assert_eq!(pace.per_useful_hour.0, decimal(0.57), "20 over 35.2 useful hours");
+    assert_eq!(pace.per_useful_hour.0, decimal(0.56), "20 over 35.5 useful hours");
     assert_eq!(pace.standing, Standing::Over, "30 used where 22 was meant by now");
 }
 
@@ -500,26 +510,42 @@ fn the_vision_worked_examples_recomputed() {
     };
     let first = codex_week().pace(memory.configuration(), &zone()).remove(0);
     println!("worked example 1: {}", line(&first));
-    // Codex SpendBy 1762450320, the whole window: 92 used, read at 1762210000.
-    let mut sets = every_day_eight_to_ten();
-    sets.push(Set::Target(meta_signal_energy_nexus::ProviderTarget {
-        provider: Provider::Codex,
-        target: spend_by(1762450320, 100),
-    }));
-    let spend = configured(sets);
+    // Codex SpendBy 2 hours before the reset, the whole window: 92 used, read
+    // at 1762210000, the week resetting at 1762235580. (The vision's instant,
+    // 1762450320, is 59.65 hours after that reset: no hours before it.)
+    let spend_by_hours = |hours: i64| {
+        let mut sets = every_day_eight_to_ten();
+        sets.push(Set::Target(meta_signal_energy_nexus::ProviderTarget {
+            provider: Provider::Codex,
+            target: spend_by(hours, 100),
+        }));
+        configured(sets)
+    };
     let reading = week(Provider::Codex, 92, 1762235580, 1762210000);
-    let second = reading.pace(spend.configuration(), &zone()).remove(0);
+    let second = reading
+        .pace(spend_by_hours(2).configuration(), &zone())
+        .remove(0);
     println!("worked example 2: {}", line(&second));
+    // The same reading under the 24 hours the target is set to in practice:
+    // the reading is past it, 7.1 hours before the reset.
+    let past = reading
+        .pace(spend_by_hours(24).configuration(), &zone())
+        .remove(0);
+    println!("worked example 2, 24 hours: {}", line(&past));
     // The same reading under Even.
     let third = reading.pace(memory.configuration(), &zone()).remove(0);
     println!("worked example 3: {}", line(&third));
     assert_eq!(line(&first), "Codex Week Even 25 35 Over 124 83.5 0.78");
     assert_eq!(line(&second), SECOND);
+    assert_eq!(line(&past), SECOND_PAST);
     assert_eq!(line(&third), THIRD);
 }
 /// The vision's second example, `{ Codex SpendBy.1762450320 88 92 Over 48 32.0 0.25 }`,
-/// as this code reads its reading.
-const SECOND: &str = "Codex Week SpendBy.{ 1762450320 100 } 71 92 Over 67 42.8 0.19";
+/// as this code reads its reading under `SpendBy.{ 2 100 }`: the target two
+/// hours before the reset.
+const SECOND: &str = "Codex Week SpendBy.{ 2 100 } 95 92 Under 5 5.1 1.57";
+/// The same reading under `SpendBy.{ 24 100 }`: past its target.
+const SECOND_PAST: &str = "Codex Week SpendBy.{ 24 100 } 100 92 Under 0 0.0 8.0";
 /// The vision's third, `{ Codex Even 23 92 Over 120 80.0 0.1 }`: the week
 /// resets 7 hours after the reading.
 const THIRD: &str = "Codex Week Even 95 92 Under 7 5.6 1.43";
@@ -535,7 +561,7 @@ mod datom_text {
             let target = match &self.target {
                 Target::Even => "Even".to_string(),
                 Target::SpendBy(spend) => {
-                    format!("SpendBy.{{ {} {} }}", spend.instant.0, spend.percent.0)
+                    format!("SpendBy.{{ {} {} }}", spend.hours.0, spend.percent.0)
                 }
             };
             format!(

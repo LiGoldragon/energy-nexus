@@ -10,4 +10,4 @@
 - A span whose To is before its From runs past midnight; From equal to To is refused.
 - The baseline is 100 until configured, so a Nexus with no schedule paces as before. Usefulness and the baseline are each a Percent, 100 the ceiling (ruling 4).
 - An override takes Since and Until (ruling 2); one whose Until has passed is removed at the next change of the schedule (ruling 5), the change being any Span, RemoveSpan, Override, RemoveOverride, Baseline or TimeZone setting.
-- `SpendBy.{ Instant Percent }` (tentative): expected is that percent of the window's useful time elapsed, and the share per useful hour is the percent left to it.
+- `SpendBy.{ Hours Percent }`: the target falls that many whole hours before the window resets, and so recurs with every reset; expected is that percent of the useful time from the window's start to the target elapsed, and the share per useful hour is the percent left to it per useful hour left. A window shorter than the hours is paced as Even.

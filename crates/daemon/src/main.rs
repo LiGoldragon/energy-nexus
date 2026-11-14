@@ -2,7 +2,7 @@ mod schedule;
 
 use energy_nexus_core::operation::{Operation, Outcome as OperationOutcome, Reminding_Data};
 use energy_nexus_core::{
-    Configuring, Levelling, Memory, OwnerZone, Pacing, RedeemDecision, Redeeming, Remembering,
+    Configuring, Levelling, Memory, NotCarried, OwnerZone, Pacing, RedeemDecision, Redeeming, Remembering,
     Reminding,
 };
 use energy_nexus_emission::{
@@ -352,14 +352,20 @@ impl Serving for Place {
             eprintln!("energy-nexus: {} upgraded from {earlier}", path.display());
         }
         let Upgrade { memory, uncarried } = Upgrade::from(admission);
-        for reminder in &uncarried {
-            let address = &reminder.recipient.0;
-            eprintln!(
-                "energy-nexus: reminder not carried, its recipient names a layer and Flow \
-                 addresses a model: {reminder}; configure it again with the model that serves \
-                 it: energy-nexus-meta 'Configure.Reminder.{{ {:?} {:?} {{ {:?} {} <Model> }} }}'",
-                reminder.provider, reminder.level, address.aspect, address.topic
-            );
+        for held in &uncarried {
+            match held {
+                NotCarried::Reminder(reminder) => {
+                    let address = &reminder.recipient.0;
+                    eprintln!(
+                        "energy-nexus: reminder not carried, its recipient names a layer and Flow \
+                         addresses a model: {reminder}; configure it again with the model that \
+                         serves it: energy-nexus-meta \
+                         'Configure.Reminder.{{ {:?} {:?} {{ {:?} {} <Model> }} }}'",
+                        reminder.provider, reminder.level, address.aspect, address.topic
+                    );
+                }
+                NotCarried::Instant(target) => eprintln!("energy-nexus: {target}"),
+            }
         }
         let own = OwnedSockets(vec![self.public(), self.meta()]);
         own.remove_at_stop()?;

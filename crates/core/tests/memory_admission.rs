@@ -1,13 +1,13 @@
 //! Memory is read through its envelope. Only a missing entry makes a memory
 //! new; the archive written before the envelope and an envelope of format
-//! version 1 or 2 are upgraded on open; a damaged or foreign file is refused and
+//! version 1, 2 or 3 are upgraded on open; a damaged or foreign file is refused and
 //! left as it is.
 
 use std::path::{Path, PathBuf};
 
 use energy_nexus_core::{
-    earlier, unversioned, version1, version2, Configuring, Memory, RedeemExpiring,
-    RedeemUsedAtLeast, Remembering,
+    earlier, unversioned, version1, version2, version3, Carry, Configuring, Memory, NotCarried,
+    RedeemExpiring, RedeemUsedAtLeast, Remembering,
 };
 use energy_nexus_wire::{Admission, Earlier, MemoryRefusal, Persisted};
 use meta_signal_energy_nexus::{ProviderTarget, WindowTarget};
@@ -91,7 +91,7 @@ fn refused(root: &Root, bytes: &[u8]) -> MemoryRefusal {
     refusal
 }
 
-fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<unversioned::Reminder>) {
+fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<NotCarried>) {
     std::fs::write(root.memory(), bytes).expect("seed");
     match Memory::load(&root.memory()).expect("the unversioned archive opens") {
         Admission::Upgraded(Earlier::Unenveloped, upgrade) => (upgrade.memory, upgrade.uncarried),
@@ -103,7 +103,7 @@ fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<unversioned::Reminder>) {
 fn written_in_the_envelope(root: &Root, memory: &Memory) {
     let bytes = std::fs::read(root.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
     match Memory::load(&root.memory()).unwrap() {
         Admission::Admitted(reopened) => {
             assert_eq!(reopened.configuration(), memory.configuration());
@@ -135,7 +135,10 @@ fn the_archive_written_before_the_envelope_is_upgraded_for_every_layer() {
         let (memory, uncarried) = upgraded(&root, &bytes);
         assert!(memory.configuration().reminder_vector.is_empty());
         assert_eq!(uncarried.len(), 1);
-        assert_eq!(uncarried[0].recipient.0.layer, layer);
+        let NotCarried::Reminder(reminder) = &uncarried[0] else {
+            panic!("a reminder is not carried, got {:?}", uncarried[0]);
+        };
+        assert_eq!(reminder.recipient.0.layer, layer);
         assert_eq!(
             uncarried[0].to_string(),
             format!("Codex Low {{ Mind energyNexus {layer:?} }}")
@@ -157,12 +160,11 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
     }));
     assert_eq!(configuration.redeem_expiring, RedeemExpiring(Minutes(720)));
     assert_eq!(configuration.redeem_used_at_least, RedeemUsedAtLeast(Percent(3)));
+    // Its Codex target was an instant, 1762450320, after the reset its latest
+    // reading holds (1762235580): no window holds it, so it is carried Even.
     assert!(configuration.targets.0.contains(&ProviderTarget {
         provider: Provider::Codex,
-        target: Target::SpendBy(signal_energy_nexus::SpendBy_Data {
-            instant: Instant(1762450320),
-            percent: Percent(100),
-        }),
+        target: Target::Even,
     }));
     assert_eq!(
         configuration.window_targets.0,
@@ -183,7 +185,10 @@ fn every_reading_and_setting_of_the_proof_of_concept_memory_is_carried() {
         uncarried.iter().map(ToString::to_string).collect::<Vec<_>>(),
         [
             "Codex Low { Mind energyNexus Secondary }",
-            "Claude Out { Psyche core Primary }"
+            "Claude Out { Psyche core Primary }",
+            "target Codex SpendBy.{ 1762450320 100 } stated an instant, which a target stated \
+             against the window's reset has no place for; carried as Even: no window of the \
+             latest reading holds that instant"
         ]
     );
     written_in_the_envelope(&root, &memory);
@@ -488,7 +493,7 @@ fn format_version_two_is_carried_whole_into_an_empty_schedule() {
     std::fs::write(root.memory(), version_two_file()).unwrap();
     let memory = match Memory::load(&root.memory()).expect("format version 2 opens") {
         Admission::Upgraded(Earlier::Version(2), upgrade) => {
-            assert!(upgrade.uncarried.is_empty());
+            assert_eq!(upgrade.uncarried.len(), 1, "the one instant, carried as hours");
             upgrade.memory
         }
         other => panic!("format version 2 is upgraded, got {other:?}"),
@@ -502,11 +507,11 @@ fn format_version_two_is_carried_whole_into_an_empty_schedule() {
         vec![ProviderTarget {
             provider: Provider::Codex,
             target: Target::SpendBy(signal_energy_nexus::SpendBy_Data {
-                instant: Instant(1795000000),
+                hours: signal_energy_nexus::Hours(15),
                 percent: Percent(100),
             }),
         }],
-        "an earlier SpendBy spends the whole window by its instant"
+        "an earlier SpendBy spends the whole window, now 15 hours before the week's reset (54860 seconds)"
     );
     assert_eq!(configuration.window_targets.0.len(), 1);
     assert!(configuration.schedule.0.is_empty());
@@ -547,5 +552,214 @@ fn a_schedule_and_a_zone_survive_a_restart() {
         memory.configure(set, Instant(1794610200)).unwrap();
     }
     memory.save(&root.memory()).unwrap();
+    written_in_the_envelope(&root, &memory);
+}
+
+fn codex_reading() -> signal_energy_nexus::Reading {
+    use signal_energy_nexus::{Allowed, At, Duration, Reading, Resets, Used, Window};
+    Reading {
+        provider: Provider::Codex,
+        allowed: Allowed(true),
+        window_vector: vec![
+            Window {
+                name: Name::Session,
+                used: Used(Percent(10)),
+                resets: Resets(Instant(1794628200)),
+                duration: Duration(Minutes(300)),
+            },
+            Window {
+                name: Name::Week,
+                used: Used(Percent(35)),
+                resets: Resets(Instant(1795054860)),
+                duration: Duration(Minutes(10080)),
+            },
+        ],
+        reset_vector: Vec::new(),
+        at: At(Instant(1794610200)),
+    }
+}
+
+/// A memory energy-nexus 0.4.x wrote, format version 3: the schedule, and a
+/// SpendBy at an instant and a percent.
+fn version_three_file() -> Vec<u8> {
+    use signal_energy_nexus::{Baseline, Hour, Span, To, Usefulness, Weekday};
+    let reading = codex_reading();
+    let spend = |instant: i64, percent: i64| {
+        version3::Target::SpendBy(version3::SpendBy {
+            instant: Instant(instant),
+            percent: Percent(percent),
+        })
+    };
+    let old = version3::Memory {
+        latest: vec![energy_nexus_core::Latest {
+            provider: Provider::Codex,
+            reading: reading.clone(),
+            level: Level::Fair,
+        }],
+        history: vec![reading],
+        configuration: version3::Configuration {
+            thresholds: vec![Threshold {
+                level: Level::Fair,
+                left: signal_energy_nexus::Left(Percent(30)),
+            }],
+            reminders: Vec::new(),
+            redeem_expiring: Minutes(600),
+            redeem_used_at_least: Percent(2),
+            targets: vec![
+                // 24 hours before the week's reset: the week, the longest window.
+                version3::ProviderTarget {
+                    provider: Provider::Codex,
+                    target: spend(1795054860 - 24 * 3600, 92),
+                },
+                // No reading is held for Claude: its reset is not known.
+                version3::ProviderTarget {
+                    provider: Provider::Claude,
+                    target: spend(1795054860 - 24 * 3600, 100),
+                },
+            ],
+            window_targets: vec![
+                // Two hours and 600 seconds before the session's reset: 2 hours, rounded.
+                version3::WindowTarget {
+                    provider: Provider::Codex,
+                    name: Name::Session,
+                    target: spend(1794628200 - 7200 - 600, 50),
+                },
+                // A window the reading does not hold.
+                version3::WindowTarget {
+                    provider: Provider::Codex,
+                    name: Name::FableWeek,
+                    target: spend(1795054860 - 24 * 3600, 100),
+                },
+                // An instant after the week's reset.
+                version3::WindowTarget {
+                    provider: Provider::Codex,
+                    name: Name::Week,
+                    target: spend(1795054860 + 30 * 24 * 3600, 100),
+                },
+                version3::WindowTarget {
+                    provider: Provider::Claude,
+                    name: Name::Week,
+                    target: version3::Target::Even,
+                },
+            ],
+            schedule: vec![Span {
+                weekday_vector: vec![Weekday::Saturday, Weekday::Sunday],
+                from: signal_energy_nexus::From(Hour(9)),
+                to: To(Hour(13)),
+                usefulness: Usefulness(Percent(50)),
+            }],
+            overrides: Vec::new(),
+            baseline: Baseline(Percent(20)),
+            time_zone: Some(signal_energy_nexus::TimeZone("America/Mexico_City".into())),
+        },
+    };
+    let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&old).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ENXMEMRY");
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&(archive.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(archive.as_slice());
+    bytes
+}
+
+fn spend_by(hours: i64, percent: i64) -> Target {
+    Target::SpendBy(signal_energy_nexus::SpendBy_Data {
+        hours: signal_energy_nexus::Hours(hours),
+        percent: Percent(percent),
+    })
+}
+
+#[test]
+fn format_version_three_carries_each_instant_as_the_hours_before_its_windows_reset() {
+    let root = Root::new("version-three");
+    std::fs::write(root.memory(), version_three_file()).unwrap();
+    let (memory, uncarried) = match Memory::load(&root.memory()).expect("format version 3 opens") {
+        Admission::Upgraded(Earlier::Version(3), upgrade) => (upgrade.memory, upgrade.uncarried),
+        other => panic!("format version 3 is upgraded, got {other:?}"),
+    };
+    let configuration = memory.configuration();
+    assert_eq!(
+        configuration.targets.0,
+        vec![
+            ProviderTarget {
+                provider: Provider::Codex,
+                target: spend_by(24, 92),
+            },
+            ProviderTarget {
+                provider: Provider::Claude,
+                target: Target::Even,
+            },
+        ]
+    );
+    assert_eq!(
+        configuration.window_targets.0,
+        vec![
+            WindowTarget {
+                provider: Provider::Codex,
+                name: Name::Session,
+                target: spend_by(2, 50),
+            },
+            WindowTarget {
+                provider: Provider::Codex,
+                name: Name::FableWeek,
+                target: Target::Even,
+            },
+            WindowTarget {
+                provider: Provider::Codex,
+                name: Name::Week,
+                target: Target::Even,
+            },
+            WindowTarget {
+                provider: Provider::Claude,
+                name: Name::Week,
+                target: Target::Even,
+            },
+        ]
+    );
+    let carries: Vec<_> = uncarried
+        .iter()
+        .map(|held| match held {
+            NotCarried::Instant(target) => target.carry.clone(),
+            other => panic!("only instants are listed, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        carries,
+        vec![
+            Carry::Hours {
+                hours: signal_energy_nexus::Hours(24),
+                window: Name::Week,
+                resets: Instant(1795054860),
+            },
+            Carry::NoReading,
+            Carry::Hours {
+                hours: signal_energy_nexus::Hours(2),
+                window: Name::Session,
+                resets: Instant(1794628200),
+            },
+            Carry::NoWindow,
+            Carry::NoWindow,
+        ],
+        "each stored target at an instant is listed, in the order stored, provider targets first"
+    );
+    assert_eq!(
+        uncarried[0].to_string(),
+        "target Codex SpendBy.{ 1794968460 92 } stated an instant, which a target stated \
+         against the window's reset has no place for; carried as SpendBy.{ 24 92 }: the Week \
+         window resets at 1795054860"
+    );
+    // Everything else is carried as it was.
+    assert_eq!(configuration.schedule.0.len(), 1);
+    assert_eq!(
+        configuration.baseline,
+        signal_energy_nexus::Baseline(Percent(20))
+    );
+    assert_eq!(
+        configuration.time_zone_option,
+        Some(signal_energy_nexus::TimeZone("America/Mexico_City".into()))
+    );
+    assert_eq!(configuration.redeem_expiring, RedeemExpiring(Minutes(600)));
+    assert_eq!(memory.history().len(), 1);
+    assert_eq!(memory.latest(&Provider::Codex).unwrap().level, Level::Fair);
     written_in_the_envelope(&root, &memory);
 }

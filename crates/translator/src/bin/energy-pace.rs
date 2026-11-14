@@ -42,7 +42,7 @@ fn show(read: signal_energy_nexus::Read_Data) {
             .unwrap_or_else(|| "the current period".into());
         let target = match pace.target {
             Target::Even => "evenly".into(),
-            Target::SpendBy(spend) => format!("{}% by {}", spend.percent.0, spend.instant.0),
+            Target::SpendBy(spend) => format!("{}% by {} hours before the window resets", spend.percent.0, spend.hours.0),
         };
         println!(
             "{:?} {:?}: {}% used over {}; target {} expects {}% now, counted in useful hours; {:?}. {} hours left, {} useful hours; {}% per useful hour from here.",

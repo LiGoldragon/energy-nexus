@@ -4,8 +4,8 @@
 //! memory is written back: a current file is written back identical, an
 //! earlier one upgraded and read back as it was carried. Ignored unless run
 //! by hand with the copies at hand.
-use energy_nexus_core::{version2, Configuring, Memory, Remembering, Validating};
-use energy_nexus_wire::{Admission, Persisted};
+use energy_nexus_core::{version2, version3, Configuring, Memory, Remembering, Validating};
+use energy_nexus_wire::{Admission, Persisted, Upgrade};
 
 #[test]
 #[ignore]
@@ -42,7 +42,7 @@ fn every_live_copy_is_read_whole_and_written_back() {
             archive.extend_from_slice(&original[20..]);
             let old = rkyv::from_bytes::<version2::Memory, rkyv::rancor::Error>(&archive)
                 .expect("the copy reads in the version 2 layout");
-            assert_eq!(Memory::from(old.clone()), memory, "carried whole");
+            assert_eq!(Upgrade::<Memory>::from(old.clone()).memory, memory, "carried whole");
             assert_eq!(memory.history(), old.history.as_slice());
             assert_eq!(memory.latest_vector, old.latest);
             assert_eq!(memory.configuration().targets.0.len(), old.configuration.targets.len());
@@ -53,6 +53,47 @@ fn every_live_copy_is_read_whole_and_written_back() {
                 old.configuration.targets.iter().map(|target| &target.target).collect::<Vec<_>>(),
                 old.configuration.window_targets.len()
             );
+        }
+        // A format version 3 copy: read in the frozen layout on its own; every
+        // stored target listed before, and after the upgrade, with what the
+        // upgrade said of each.
+        if original[8..12] == 3u32.to_le_bytes() {
+            let mut archive = rkyv::util::AlignedVec::<16>::new();
+            archive.extend_from_slice(&original[20..]);
+            let old = rkyv::from_bytes::<version3::Memory, rkyv::rancor::Error>(&archive)
+                .expect("the copy reads in the version 3 layout");
+            let carried = Upgrade::<Memory>::from(old.clone());
+            assert_eq!(carried.memory, memory, "carried whole");
+            assert_eq!(memory.history(), old.history.as_slice());
+            assert_eq!(memory.latest_vector, old.latest);
+            assert_eq!(memory.configuration().schedule.0, old.configuration.schedule);
+            println!("  version 3 targets before:");
+            for target in &old.configuration.targets {
+                println!("    {:?} {:?}", target.provider, target.target);
+            }
+            for target in &old.configuration.window_targets {
+                println!("    {:?} {:?} {:?}", target.provider, target.name, target.target);
+            }
+            println!("  version 4 targets after:");
+            for target in &memory.configuration().targets.0 {
+                println!("    {:?} {:?}", target.provider, target.target);
+            }
+            for target in &memory.configuration().window_targets.0 {
+                println!("    {:?} {:?} {:?}", target.provider, target.name, target.target);
+            }
+            for held in &carried.uncarried {
+                println!("    logged: energy-nexus: {held}");
+            }
+            for provider in [signal_energy_nexus::Provider::Claude, signal_energy_nexus::Provider::Codex] {
+                if let Some(latest) = memory.latest(&provider) {
+                    for window in &latest.reading.window_vector {
+                        println!(
+                            "    latest {:?} {:?}: resets {}, {} minutes",
+                            provider, window.name, window.resets.0.0, window.duration.0.0
+                        );
+                    }
+                }
+            }
         }
         let mut latest = 0;
         for provider in [signal_energy_nexus::Provider::Claude, signal_energy_nexus::Provider::Codex] {

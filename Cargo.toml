@@ -7,8 +7,8 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "8c861ec2b52be29f13c616c3501557bc38708d22", default-features = false }
-meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "24958c7417d251525c7823c3c0ca91ff51401b9c", default-features = false }
+signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "3155eb0c476f92ea1b340c29e82c8a26e8900653", default-features = false }
+meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "e148b1dd4d27b623029d3b007fc21160a6c5b670", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "4982eeb6f8b2ef8a86a0070dc02acaf0f2088272", default-features = false }
 # The owner's time zone: the system's, or a configured IANA name read from the

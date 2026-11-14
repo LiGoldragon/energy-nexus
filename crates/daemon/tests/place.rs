@@ -187,9 +187,14 @@ fn the_proof_of_concept_memory_moved_into_the_place_is_upgraded_and_served() {
     assert!(report.contains("upgraded from the archive written before the envelope"));
     assert!(report.contains("Codex Low { Mind energyNexus Secondary }"));
     assert!(report.contains("Claude Out { Psyche core Primary }"));
+    assert!(
+        report.contains("energy-nexus: target Codex SpendBy.{ 1762450320 100 } stated an instant"),
+        "the target at an instant is logged with how it was carried"
+    );
+    assert!(report.contains("carried as Even: no window of the latest reading holds that instant"));
     let bytes = std::fs::read(shared.place.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
     match Memory::load(&shared.place.memory()).unwrap() {
         Admission::Admitted(memory) => {
             assert_eq!(memory.history().len(), 3);

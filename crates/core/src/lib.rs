@@ -72,12 +72,19 @@ pub trait Validating {
     fn validate(&self) -> Result<(), String>;
 }
 impl Validating for Target {
-    /// A target short of whole spends between none and all of its window.
+    /// A target short of whole spends between none and all of its window, and
+    /// falls a whole number of hours, none or more, before the window resets;
+    /// a window shorter than that is known only where the pace is computed.
     fn validate(&self) -> Result<(), String> {
         match self {
             Target::Even => Ok(()),
-            Target::SpendBy(spend) if (0..=100).contains(&spend.percent.0) => Ok(()),
-            Target::SpendBy(_) => Err("a target's percent must be between 0 and 100".into()),
+            Target::SpendBy(spend) if spend.hours.0 < 0 => {
+                Err("a target's hours before the reset must not be negative".into())
+            }
+            Target::SpendBy(spend) if !(0..=100).contains(&spend.percent.0) => {
+                Err("a target's percent must be between 0 and 100".into())
+            }
+            Target::SpendBy(_) => Ok(()),
         }
     }
 }
@@ -141,17 +148,17 @@ impl OwnerZone for Configuration {
     }
 }
 
-/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 3 holds
-/// the usefulness schedule (spans, overrides, a baseline) and the owner's
-/// zone, and a target may be short of whole. Versions 2 and 1 and the
+/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 4 holds a
+/// `SpendBy` target as the hours before the window resets, recurring with
+/// every reset; version 3 held it as an instant. Versions 3, 2 and 1 and the
 /// archive written before the envelope are upgraded on open.
 impl Persisted for Memory {
     const ENVELOPE: Envelope = Envelope {
         magic: *b"ENXMEMRY",
-        version: 3,
+        version: 4,
     };
-    const EARLIER_VERSIONS: &'static [u32] = &[1, 2];
-    type Uncarried = unversioned::Reminder;
+    const EARLIER_VERSIONS: &'static [u32] = &[1, 2, 3];
+    type Uncarried = NotCarried;
     fn from_archive(archive: &[u8]) -> Result<Self, String> {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
     }
@@ -172,6 +179,11 @@ impl Persisted for Memory {
                     .map(Upgrade::from)
                     .map_err(|error| error.to_string())
             }
+            Earlier::Version(3) => {
+                rkyv::from_bytes::<version3::Memory, rkyv::rancor::Error>(archive)
+                    .map(Upgrade::from)
+                    .map_err(|error| error.to_string())
+            }
             Earlier::Version(version) => Err(format!("no layout of format version {version}")),
         }
     }
@@ -187,7 +199,7 @@ impl Persisted for Memory {
 /// envelope stored it, frozen: `SpendBy` names only an instant, the whole
 /// window spent by then.
 pub mod earlier {
-    use signal_energy_nexus::{Instant, Name, Percent, Provider, SpendBy_Data};
+    use signal_energy_nexus::{Instant, Name, Percent, Provider};
 
     #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
     pub enum Target {
@@ -206,18 +218,18 @@ pub mod earlier {
         pub target: Target,
     }
     /// An earlier `SpendBy` is the whole window, 100%, by its instant.
-    impl From<Target> for signal_energy_nexus::Target {
+    impl From<Target> for super::version3::Target {
         fn from(old: Target) -> Self {
             match old {
                 Target::Even => Self::Even,
-                Target::SpendBy(instant) => Self::SpendBy(SpendBy_Data {
+                Target::SpendBy(instant) => Self::SpendBy(super::version3::SpendBy {
                     instant,
                     percent: Percent(100),
                 }),
             }
         }
     }
-    impl From<ProviderTarget> for signal_energy_nexus::ProviderTarget {
+    impl From<ProviderTarget> for super::version3::ProviderTarget {
         fn from(old: ProviderTarget) -> Self {
             Self {
                 provider: old.provider,
@@ -225,7 +237,7 @@ pub mod earlier {
             }
         }
     }
-    impl From<WindowTarget> for signal_energy_nexus::WindowTarget {
+    impl From<WindowTarget> for super::version3::WindowTarget {
         fn from(old: WindowTarget) -> Self {
             Self {
                 provider: old.provider,
@@ -321,9 +333,16 @@ pub mod unversioned {
                     window_targets: configuration.window_targets,
                 },
             };
+            let mut upgrade = super::Upgrade::from(carried);
+            let mut uncarried: Vec<super::NotCarried> = configuration
+                .reminders
+                .into_iter()
+                .map(super::NotCarried::Reminder)
+                .collect();
+            uncarried.append(&mut upgrade.uncarried);
             Self {
-                memory: carried.into(),
-                uncarried: configuration.reminders,
+                memory: upgrade.memory,
+                uncarried,
             }
         }
     }
@@ -372,12 +391,12 @@ pub mod version1 {
 /// The layout of format version 2, written by energy-nexus 0.3.0 to the
 /// generated Memory of `ethos-565bc8` before the schedule (5b519a9): no
 /// schedule, no zone, and a `SpendBy` of an instant alone. Everything is
-/// carried; the schedule begins empty, with no override, every hour counts at
-/// the default baseline, 100, the zone is the system's, and an earlier
-/// `SpendBy` spends the whole window, so pace reads as it did.
+/// carried into version 3, then version 4; the schedule begins empty, with no
+/// override, every hour counts at the default baseline, 100, the zone is the
+/// system's, and an earlier `SpendBy` spends the whole window.
 pub mod version2 {
     use super::earlier::{ProviderTarget, WindowTarget};
-    use signal_energy_nexus::{Minutes, Percent, Reading, Reminder, Threshold};
+    use signal_energy_nexus::{Baseline, Minutes, Percent, Reading, Reminder, Threshold};
 
     #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
     pub struct Memory {
@@ -394,10 +413,196 @@ pub mod version2 {
         pub targets: Vec<ProviderTarget>,
         pub window_targets: Vec<WindowTarget>,
     }
-    impl From<Memory> for super::Memory {
+    impl From<Memory> for super::version3::Memory {
         fn from(old: Memory) -> Self {
             let configuration = old.configuration;
             Self {
+                latest: old.latest,
+                history: old.history,
+                configuration: super::version3::Configuration {
+                    thresholds: configuration.thresholds,
+                    reminders: configuration.reminders,
+                    redeem_expiring: configuration.redeem_expiring,
+                    redeem_used_at_least: configuration.redeem_used_at_least,
+                    targets: configuration.targets.into_iter().map(Into::into).collect(),
+                    window_targets: configuration
+                        .window_targets
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    schedule: Vec::new(),
+                    overrides: Vec::new(),
+                    baseline: Baseline(Percent(100)),
+                    time_zone: None,
+                },
+            }
+        }
+    }
+    impl From<Memory> for super::Upgrade<super::Memory> {
+        fn from(old: Memory) -> Self {
+            super::version3::Memory::from(old).into()
+        }
+    }
+}
+/// The layout of format version 3, written by energy-nexus 0.4.0: the
+/// schedule and the zone, and a `SpendBy` of an instant and a percent. A
+/// target at an instant has no place in version 4, which states it as the
+/// hours before the window resets; see `Upgrade::from`.
+pub mod version3 {
+    use super::{Carry, InstantTarget, NotCarried};
+    use signal_energy_nexus::{
+        Baseline, Hours, Instant, Minutes, Name, Override, Percent, Provider, Reading, Reminder,
+        Span, SpendBy_Data, Threshold, TimeZone,
+    };
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct SpendBy {
+        pub instant: Instant,
+        pub percent: Percent,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub enum Target {
+        Even,
+        SpendBy(SpendBy),
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct ProviderTarget {
+        pub provider: Provider,
+        pub target: Target,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct WindowTarget {
+        pub provider: Provider,
+        pub name: Name,
+        pub target: Target,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Memory {
+        pub latest: Vec<super::Latest>,
+        pub history: Vec<Reading>,
+        pub configuration: Configuration,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Configuration {
+        pub thresholds: Vec<Threshold>,
+        pub reminders: Vec<Reminder>,
+        pub redeem_expiring: Minutes,
+        pub redeem_used_at_least: Percent,
+        pub targets: Vec<ProviderTarget>,
+        pub window_targets: Vec<WindowTarget>,
+        pub schedule: Vec<Span>,
+        pub overrides: Vec<Override>,
+        pub baseline: Baseline,
+        pub time_zone: Option<TimeZone>,
+    }
+
+    /// Where a target at an instant falls in the latest reading held for its
+    /// provider. A window target names its window; a provider target is
+    /// carried by the longest window (the earliest listed of equals) whose
+    /// span, from its start to its reset, holds the instant. The hours are the
+    /// reset less the instant, rounded to the hour; the instant must fall
+    /// within the window, hours from none to the window's duration.
+    fn carry(
+        latest: &[super::Latest],
+        provider: &Provider,
+        window: Option<&Name>,
+        spend: &SpendBy,
+    ) -> Carry {
+        let Some(held) = latest.iter().find(|held| &held.provider == provider) else {
+            return Carry::NoReading;
+        };
+        let mut windows: Vec<_> = held
+            .reading
+            .window_vector
+            .iter()
+            .filter(|candidate| window.map_or(true, |name| &candidate.name == name))
+            .collect();
+        windows.sort_by_key(|candidate| std::cmp::Reverse(candidate.duration.0 .0));
+        for candidate in windows {
+            let seconds = candidate.resets.0 .0 - spend.instant.0;
+            let hours = (seconds + 1_800).div_euclid(3_600);
+            if (0..=candidate.duration.0 .0 / 60).contains(&hours) {
+                return Carry::Hours {
+                    hours: Hours(hours),
+                    window: candidate.name.clone(),
+                    resets: candidate.resets.0,
+                };
+            }
+        }
+        Carry::NoWindow
+    }
+    fn carried(
+        latest: &[super::Latest],
+        provider: &Provider,
+        window: Option<&Name>,
+        target: Target,
+        uncarried: &mut Vec<NotCarried>,
+    ) -> signal_energy_nexus::Target {
+        let spend = match target {
+            Target::Even => return signal_energy_nexus::Target::Even,
+            Target::SpendBy(spend) => spend,
+        };
+        let how = carry(latest, provider, window, &spend);
+        let carried = match &how {
+            Carry::Hours { hours, .. } => signal_energy_nexus::Target::SpendBy(SpendBy_Data {
+                hours: hours.clone(),
+                percent: spend.percent.clone(),
+            }),
+            Carry::NoReading | Carry::NoWindow => signal_energy_nexus::Target::Even,
+        };
+        uncarried.push(NotCarried::Instant(InstantTarget {
+            provider: provider.clone(),
+            window: window.cloned(),
+            instant: spend.instant,
+            percent: spend.percent,
+            carry: how,
+        }));
+        carried
+    }
+    /// Every reading, level, threshold, reminder, schedule and setting is
+    /// carried as it was. A target at an instant is carried as the hours
+    /// before the reset of the window the latest reading for its provider
+    /// holds, else as `Even`; each is listed as not carried as it stood.
+    impl From<Memory> for super::Upgrade<super::Memory> {
+        fn from(old: Memory) -> Self {
+            let mut uncarried = Vec::new();
+            let configuration = old.configuration;
+            let targets = configuration
+                .targets
+                .into_iter()
+                .map(|configured| {
+                    let target = carried(
+                        &old.latest,
+                        &configured.provider,
+                        None,
+                        configured.target,
+                        &mut uncarried,
+                    );
+                    meta_signal_energy_nexus::ProviderTarget {
+                        provider: configured.provider,
+                        target,
+                    }
+                })
+                .collect();
+            let window_targets = configuration
+                .window_targets
+                .into_iter()
+                .map(|configured| {
+                    let target = carried(
+                        &old.latest,
+                        &configured.provider,
+                        Some(&configured.name),
+                        configured.target,
+                        &mut uncarried,
+                    );
+                    meta_signal_energy_nexus::WindowTarget {
+                        provider: configured.provider,
+                        name: configured.name,
+                        target,
+                    }
+                })
+                .collect();
+            let memory = super::Memory {
                 latest_vector: old.latest,
                 history: super::History(old.history),
                 configuration: super::Configuration {
@@ -407,23 +612,83 @@ pub mod version2 {
                     redeem_used_at_least: super::RedeemUsedAtLeast(
                         configuration.redeem_used_at_least,
                     ),
-                    targets: super::Targets(
-                        configuration.targets.into_iter().map(Into::into).collect(),
-                    ),
-                    window_targets: super::WindowTargets(
-                        configuration.window_targets.into_iter().map(Into::into).collect(),
-                    ),
-                    ..super::Configuration::default()
+                    targets: super::Targets(targets),
+                    window_targets: super::WindowTargets(window_targets),
+                    schedule: super::Schedule(configuration.schedule),
+                    override_vector: configuration.overrides,
+                    baseline: configuration.baseline,
+                    time_zone_option: configuration.time_zone,
                 },
-            }
+            };
+            Self { memory, uncarried }
         }
     }
-    impl From<Memory> for super::Upgrade<super::Memory> {
-        fn from(old: Memory) -> Self {
-            Self {
-                memory: old.into(),
-                uncarried: Vec::new(),
-            }
+}
+
+/// What an earlier archive held that this layout has no place for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotCarried {
+    /// A reminder whose recipient named a layer (format before version 1's
+    /// models).
+    Reminder(unversioned::Reminder),
+    /// A target at an instant, carried as the hours before a reset or as
+    /// `Even`.
+    Instant(InstantTarget),
+}
+impl std::fmt::Display for NotCarried {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reminder(reminder) => reminder.fmt(formatter),
+            Self::Instant(target) => target.fmt(formatter),
+        }
+    }
+}
+/// A stored `SpendBy.{ Instant Percent }`, and how it was carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstantTarget {
+    pub provider: Provider,
+    /// The window a window target names; none for a provider target.
+    pub window: Option<signal_energy_nexus::Name>,
+    pub instant: Instant,
+    pub percent: Percent,
+    pub carry: Carry,
+}
+/// How a target at an instant was carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Carry {
+    /// As the hours before the reset of this window.
+    Hours {
+        hours: Hours,
+        window: signal_energy_nexus::Name,
+        resets: Instant,
+    },
+    /// As `Even`: no reading is held for the provider, so no reset is known.
+    NoReading,
+    /// As `Even`: no window of the latest reading holds the instant.
+    NoWindow,
+}
+impl std::fmt::Display for InstantTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "target {:?}", self.provider)?;
+        if let Some(window) = &self.window {
+            write!(formatter, " {window:?}")?;
+        }
+        write!(
+            formatter,
+            " SpendBy.{{ {} {} }} stated an instant, which a target stated against the window's reset has no place for; carried as ",
+            self.instant.0, self.percent.0
+        )?;
+        match &self.carry {
+            Carry::Hours { hours, window, resets } => write!(
+                formatter,
+                "SpendBy.{{ {} {} }}: the {window:?} window resets at {}",
+                hours.0, self.percent.0, resets.0
+            ),
+            Carry::NoReading => write!(formatter, "Even: no reading is held for the provider"),
+            Carry::NoWindow => write!(
+                formatter,
+                "Even: no window of the latest reading holds that instant"
+            ),
         }
     }
 }
@@ -468,10 +733,21 @@ impl Pacing for Reading {
                 let start = window.resets.0.0 - window.duration.0.0 * 60;
                 // The instant the target ends at and how much of the window
                 // it spends by then: the whole window by its reset, or a
-                // percent of it by an instant.
-                let (deadline, goal) = match &target {
-                    Target::Even => (window.resets.0.0, 100),
-                    Target::SpendBy(spend) => (spend.instant.0, spend.percent.0.clamp(0, 100)),
+                // percent of it by so many hours before this window's reset,
+                // which recurs with every reset. A target of more hours than
+                // the window lasts does not reach it: this window is paced
+                // as Even.
+                let (deadline, goal, target) = match target {
+                    Target::SpendBy(spend)
+                        if (0..=window.duration.0.0 * 60 / 3_600).contains(&spend.hours.0) =>
+                    {
+                        (
+                            window.resets.0.0 - spend.hours.0 * 3_600,
+                            spend.percent.0.clamp(0, 100),
+                            Target::SpendBy(spend),
+                        )
+                    }
+                    Target::SpendBy(_) | Target::Even => (window.resets.0.0, 100, Target::Even),
                 };
                 let at = self.at.0.0;
                 let now = at.clamp(start.min(deadline), deadline.max(start));
@@ -757,9 +1033,9 @@ mod tests {
     use meta_signal_energy_nexus::WindowTarget;
     use signal_energy_nexus::{Allowed, At, Duration, Expires, Instant, Name, Resets, Window};
 
-    fn spend_by(instant: i64) -> Target {
+    fn spend_by(hours: i64) -> Target {
         Target::SpendBy(signal_energy_nexus::SpendBy_Data {
-            instant: Instant(instant),
+            hours: Hours(hours),
             percent: Percent(100),
         })
     }
@@ -814,7 +1090,7 @@ mod tests {
         let mut configuration = Configuration::default();
         configuration.targets = Targets(vec![ProviderTarget {
             provider: Provider::Codex,
-            target: spend_by(170),
+            target: spend_by(0),
         }]);
         let pace = value.pace(&configuration, &jiff::tz::TimeZone::UTC).remove(0);
         assert_eq!(pace.used, Used(Percent(92)));
@@ -855,14 +1131,14 @@ mod tests {
         configuration.window_targets = WindowTargets(vec![WindowTarget {
             provider: Provider::Codex,
             name: Name::FableWeek,
-            target: spend_by(220),
+            target: spend_by(24),
         }]);
         let pace = value.pace(&configuration, &jiff::tz::TimeZone::UTC);
         assert_eq!(pace.len(), 2);
         assert_eq!(pace[0].name, Name::Week);
         assert_eq!(pace[0].target, Target::Even);
         assert_eq!(pace[1].name, Name::FableWeek);
-        assert_eq!(pace[1].target, spend_by(220));
+        assert_eq!(pace[1].target, spend_by(24));
     }
     #[test]
     fn memory_survives_a_restart() {
@@ -877,7 +1153,7 @@ mod tests {
             .configure(
                 Set::Target(ProviderTarget {
                     provider: Provider::Codex,
-                    target: spend_by(170),
+                    target: spend_by(24),
                 }),
                 Instant(0),
             )
@@ -903,7 +1179,7 @@ mod tests {
                 .find(|target| target.provider == Provider::Codex)
                 .unwrap()
                 .target,
-            spend_by(170)
+            spend_by(24)
         );
         std::fs::remove_file(path).unwrap();
     }
