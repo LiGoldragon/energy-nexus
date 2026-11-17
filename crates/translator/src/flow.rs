@@ -16,12 +16,16 @@
 //! reads the receipt, and writes its query only on `Greeted` naming the
 //! digest of the contract it was built with. Any other answer is a typed
 //! `SubscriptionFailure` and the connection is closed with no query sent.
+//! A failure that is Flow speaking another contract is told to the daemon,
+//! `TurnEndsRefused.ContractMismatch`, since no turn end will reach it
+//! until a Flow of this contract places its socket.
 use crate::{turn_end_outcome, FlowFraming};
 use energy_nexus_emission::Output as EmissionOutput;
 use energy_nexus_wire::Framing;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use signal::{ByteViewable, Signalizable};
+use signal_energy_nexus::{ContractMismatch, FlowContract, Instant, OwnContract, Since};
 use signal_flow::Contracted;
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
@@ -100,7 +104,7 @@ pub enum SubscriptionFailure {
     /// read on it.
     Transport(std::io::Error),
     /// Flow answered the greeting with `GreetingRefused`: its contract is
-    /// not signal-flow 63's. The rejection carries Flow's own digest.
+    /// not this translator's. The rejection carries Flow's own digest.
     GreetingRefused(signal_flow::HandshakeRejection),
     /// Flow answered `Greeted` naming a contract other than this
     /// translator's.
@@ -115,6 +119,17 @@ pub enum SubscriptionFailure {
 impl From<std::io::Error> for SubscriptionFailure {
     fn from(error: std::io::Error) -> Self {
         Self::Transport(error)
+    }
+}
+impl SubscriptionFailure {
+    /// Flow's contract digest, where the failure is Flow speaking a contract
+    /// other than this translator's.
+    pub fn flow_contract(&self) -> Option<signal_flow::ContractDigest> {
+        match self {
+            Self::GreetingRefused(signal_flow::HandshakeRejection::ContractMismatch(digest))
+            | Self::GreetedAnotherContract(digest) => Some(*digest),
+            Self::Transport(_) | Self::ReceiptUnreadable(_) | Self::GreetingUnanswered(_) => None,
+        }
     }
 }
 impl std::fmt::Display for SubscriptionFailure {
@@ -187,7 +202,7 @@ impl GreetsFlowNexus for UnixStream {
 pub trait SubscribesToFlow: Send + 'static {
     fn subscribe(&self, socket: &Path) -> Result<UnixStream, SubscriptionFailure>;
 }
-/// The subscription as Flow 0.55.0 takes it (signal-flow 63): the greeting,
+/// The subscription as Flow 0.56 takes it (signal-flow 64): the greeting,
 /// whose receipt each read waits for `greeting_wait`, then `Observe.TurnEnds`.
 pub struct ObserveTurnEnds {
     pub greeting_wait: GreetingWait,
@@ -331,6 +346,35 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
             }
         }
     }
+    /// A failed subscription, told: a contract mismatch to the daemon as
+    /// `TurnEndsRefused`, loudly to the journal, every failure to the journal.
+    fn failed(&mut self, failure: &SubscriptionFailure) {
+        eprintln!(
+            "energy-translator: Flow's socket at {} did not take the subscription ({failure}); \
+             waiting for its next event",
+            self.watch.socket().display()
+        );
+        if let Some(flow_contract) = failure.flow_contract() {
+            let own_contract = signal_flow::Input::contract_digest();
+            eprintln!(
+                "energy-translator: CONTRACT MISMATCH: Flow speaks contract {} and this translator \
+                 {}; no turn end reaches Energy and its readings go stale until both speak one",
+                flow_contract.0, own_contract.0
+            );
+            let since = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .unwrap_or_default();
+            let _ = send(
+                &mut self.daemon,
+                EmissionOutput::TurnEndsRefused(ContractMismatch {
+                    since: Since(Instant(since)),
+                    own_contract: OwnContract(own_contract),
+                    flow_contract: FlowContract(flow_contract),
+                }),
+            );
+        }
+    }
     /// Looks for Flow once, the watch already armed; then forwards each
     /// subscription and waits for Flow's socket between them. Returns when
     /// the daemon goes, or sends `Down` and returns when the place's
@@ -338,11 +382,8 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
     fn run(mut self) {
         let mut subscribed = match self.subscriber.subscribe(self.watch.socket()) {
             Ok(flow) => Some(flow),
-            Err(error) => {
-                eprintln!(
-                    "energy-translator: Flow at {} absent ({error}); waiting for its socket",
-                    self.watch.socket().display()
-                );
+            Err(failure) => {
+                self.failed(&failure);
                 None
             }
         };
@@ -417,11 +458,7 @@ impl<S: SubscribesToFlow> TurnEndRelay<S> {
                 Watched::Other => {}
                 Watched::Appeared => match self.subscriber.subscribe(self.watch.socket()) {
                     Ok(flow) => return Waited::Subscribed(flow),
-                    Err(error) => eprintln!(
-                        "energy-translator: Flow's socket at {} did not take the subscription \
-                         ({error}); waiting for its next event",
-                        self.watch.socket().display()
-                    ),
+                    Err(failure) => self.failed(&failure),
                 },
             }
         }
@@ -914,6 +951,13 @@ mod tests {
             ))
         );
         assert!(rest.recv_timeout(EVENT_WAIT).unwrap().is_empty());
+        // The daemon is told, typed: Flow's digest and this translator's.
+        assert!(matches!(
+            outcome(&mut daemon),
+            EmissionOutput::TurnEndsRefused(mismatch)
+                if mismatch.flow_contract.0 == signal_flow::ContractDigest(0x60)
+                    && mismatch.own_contract.0 == signal_flow::Input::contract_digest()
+        ));
         // The relay waits on the socket's next event, not on a timer. A
         // Flow that greets properly is placed; the next attempt succeeds.
         std::fs::remove_file(&socket).unwrap();

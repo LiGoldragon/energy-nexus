@@ -1,5 +1,13 @@
 # Upgrades
 
+## 0.6.0 — a reading Flow's refused subscription left stale says so
+
+On signal-energy-nexus 0.8.0 (`87f3c38`) and meta-signal-energy-nexus 0.7.1 (`a159fa4`); the translator speaks signal-flow 64 to Flow 0.56 (0.5.1).
+
+When Flow refuses the translator's turn-end subscription because the two speak different contracts (`GreetingRefused.ContractMismatch`, or `Greeted` naming another digest), the translator tells the daemon on the emission socket, `TurnEndsRefused.ContractMismatch.{ Since OwnContract FlowContract }`, and writes a `CONTRACT MISMATCH` line to its journal. The daemon holds `TurnEndSubscription.Mismatched` from the first refusal's instant until Flow takes a subscription again (its opening, `TurnEndsObserved`, sets `Held`), logs `STALE`, and every `Read` answers with it. `energy-pace` prints each provider's read time in the system's zone and its age, and, while `Mismatched`, `STALE`, since when and both digests, so an old figure is not shown as current. The state is the running daemon's; Memory does not hold it, and a restarted translator tells it again on its first refused look.
+
+**Deployment.** The daemon, the translator and the three text clients deploy together: the ordinary contract's digest moves (`8351560973109316117` to `7365813284414732128`), and the emission socket gains an output. Memory is unchanged.
+
 ## 0.5.0 — a SpendBy target is hours before the window resets, and recurs; Memory format version 4
 
 All five packages move to 0.5.0, on signal-energy-nexus 0.7.0 (`16c7ad9`) and meta-signal-energy-nexus 0.7.0 (`33ec917`), whose `Target.SpendBy` is `{ Hours Percent }` in place of `{ Instant Percent }` (Fable's ruling: a target stated against the window's reset recurs). Nothing else recurs.

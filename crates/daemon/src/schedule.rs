@@ -492,6 +492,7 @@ mod tests {
             Output::Read(Read_Data {
                 reading,
                 pace_vector: Vec::new(),
+                turn_end_subscription: signal_energy_nexus::TurnEndSubscription::Held,
             })
         }
         async fn recall(&self, provider: Provider) -> Output {
@@ -500,6 +501,7 @@ mod tests {
                 Some(reading) => Output::Read(Read_Data {
                     reading: reading.clone(),
                     pace_vector: Vec::new(),
+                    turn_end_subscription: signal_energy_nexus::TurnEndSubscription::Held,
                 }),
                 None => Output::Refused(Refused::ProviderDown(provider)),
             }

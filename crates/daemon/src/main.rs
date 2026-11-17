@@ -21,7 +21,8 @@ use energy_nexus_wire::{
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{
-    Answerable, Call, Changed_Data, Instant, Output, Provider, Read_Data, Refused, Reset,
+    Answerable, Call, Changed_Data, ContractMismatch, Instant, Output, Provider, Read_Data,
+    Refused, Reset, TurnEndSubscription,
 };
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
@@ -36,6 +37,40 @@ struct Nexus {
     withheld: HashMap<Provider, Instant>,
     /// Unix seconds now: the wall clock, and in a test one it sets.
     now: fn() -> i64,
+    /// Whether Flow's turn ends reach the Nexus, as the translator last
+    /// told it; every read answers with it, so a stale reading says so.
+    turn_ends: TurnEndSubscription,
+}
+/// What the translator tells of Flow's turn ends, held by the Nexus.
+trait Subscribing {
+    /// Flow took the subscription: its turn ends reach the Nexus.
+    fn turn_ends_held(&mut self);
+    /// Flow refused the subscription, its contract not Energy's. A refusal
+    /// while one is held keeps the first one's instant: the readings have
+    /// been stale since then.
+    fn turn_ends_refused(&mut self, mismatch: ContractMismatch);
+}
+impl Subscribing for Nexus {
+    fn turn_ends_held(&mut self) {
+        if let TurnEndSubscription::Mismatched(mismatch) = &self.turn_ends {
+            eprintln!(
+                "energy-nexus: Flow's turn ends reach Energy again, refused since {}",
+                mismatch.since.0 .0
+            );
+        }
+        self.turn_ends = TurnEndSubscription::Held;
+    }
+    fn turn_ends_refused(&mut self, mismatch: ContractMismatch) {
+        eprintln!(
+            "energy-nexus: STALE: Flow refused the turn-end subscription, contract mismatch: \
+             Flow speaks {} and Energy {}; no reading is read on a turn end, and every read \
+             answers Mismatched with the reading held",
+            mismatch.flow_contract.0 .0, mismatch.own_contract.0 .0
+        );
+        if !matches!(self.turn_ends, TurnEndSubscription::Mismatched(_)) {
+            self.turn_ends = TurnEndSubscription::Mismatched(mismatch);
+        }
+    }
 }
 trait Emitting {
     fn emit(&self, emission: Emission) -> Result<ExternalOutcome, String>;
@@ -208,6 +243,7 @@ impl Acting for Nexus {
                     &self.memory.configuration().owner_zone(),
                 ),
                 reading: latest.reading.clone(),
+                turn_end_subscription: self.turn_ends.clone(),
             }),
             None => Output::Refused(Refused::ProviderDown(provider)),
         }
@@ -263,6 +299,7 @@ impl Acting for Nexus {
                 Output::Read(Read_Data {
                     reading,
                     pace_vector,
+                    turn_end_subscription: self.turn_ends.clone(),
                 })
             }
             // The fresh reading failed: the reading held answers, its own
@@ -317,8 +354,13 @@ impl Reads for Daemon {
 /// waits for Flow's socket and subscribes again, and the new opening comes
 /// on this same connection, taken as the first. It ends when the translator
 /// answers `Down` (its watch on the place is lost) or goes, and the daemon's
-/// unit is bound to the translator's.
-fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) {
+/// unit is bound to the translator's. A refusal, `TurnEndsRefused`, and an
+/// opening after it are held by the Nexus, which every read answers with.
+fn subscribe(
+    place: &Place,
+    events: &tokio::sync::mpsc::UnboundedSender<Event>,
+    nexus: &Arc<Mutex<Nexus>>,
+) {
     let opened = UnixStream::connect(place.emission())
         .map_err(|error| error.to_string())
         .and_then(|mut stream| {
@@ -343,7 +385,18 @@ fn subscribe(place: &Place, events: &tokio::sync::mpsc::UnboundedSender<Event>) 
             .ok()
             .and_then(|bytes| Signal::<EmissionOutput>::from(bytes).restore().ok());
         let event = match event {
-            Some(EmissionOutput::TurnEndsObserved(ends)) => Event::TurnEndsObserved(ends),
+            Some(EmissionOutput::TurnEndsRefused(mismatch)) => {
+                if let Ok(mut nexus) = nexus.lock() {
+                    nexus.turn_ends_refused(mismatch);
+                }
+                continue;
+            }
+            Some(EmissionOutput::TurnEndsObserved(ends)) => {
+                if let Ok(mut nexus) = nexus.lock() {
+                    nexus.turn_ends_held();
+                }
+                Event::TurnEndsObserved(ends)
+            }
             Some(EmissionOutput::TurnEnded(end)) => Event::TurnEnded(end),
             _ => {
                 eprintln!(
@@ -413,6 +466,7 @@ impl Serving for Place {
             place: self.clone(),
             withheld: HashMap::new(),
             now: wall_now,
+            turn_ends: TurnEndSubscription::Held,
         }));
         // The schedule: every read Energy makes is its, on an event.
         let schedule = Schedule::new(Daemon(Arc::clone(&nexus)), WallClock::default(), latest);
@@ -429,7 +483,8 @@ impl Serving for Place {
         {
             let place = self.clone();
             let events = events.clone();
-            std::thread::spawn(move || subscribe(&place, &events));
+            let nexus = Arc::clone(&nexus);
+            std::thread::spawn(move || subscribe(&place, &events, &nexus));
         }
         {
             let nexus = Arc::clone(&nexus);
@@ -565,6 +620,7 @@ mod tests {
             subscribers: Vec::new(),
             withheld: HashMap::new(),
             now: wall_now,
+            turn_ends: TurnEndSubscription::Held,
             place: Place {
                 name: energy_nexus_wire::PlaceName("test".into()),
                 runtime: root.join("run"),
@@ -709,6 +765,39 @@ mod tests {
         assert_eq!(read.reading.provider, Provider::Claude);
         assert_eq!(read.reading.at.0, Instant(4_700), "its own instant is its age");
         assert_eq!(used_by(&nexus.memory, &Provider::Claude), Percent(10), "nothing was levelled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_refused_subscription_is_carried_by_every_read_from_its_first_instant_until_flow_takes_it() {
+        at(5_000);
+        let (mut nexus, root) = held_nexus("turn-ends-refused", Provider::Claude, 10, 4_700);
+        let mismatch = |since: i64| ContractMismatch {
+            since: signal_energy_nexus::Since(Instant(since)),
+            own_contract: signal_energy_nexus::OwnContract(signal::ContractDigest(63)),
+            flow_contract: signal_energy_nexus::FlowContract(signal::ContractDigest(64)),
+        };
+        let carried = |nexus: &Nexus| match nexus.recall(Provider::Claude) {
+            Output::Read(read) => read.turn_end_subscription,
+            other => panic!("the held reading answers, got {other:?}"),
+        };
+        assert_eq!(carried(&nexus), TurnEndSubscription::Held);
+        nexus.turn_ends_refused(mismatch(4_800));
+        nexus.turn_ends_refused(mismatch(4_900));
+        assert_eq!(
+            carried(&nexus),
+            TurnEndSubscription::Mismatched(mismatch(4_800)),
+            "stale since the first refusal"
+        );
+        let translator = Translating::at(&nexus);
+        translator.answers(down(&Provider::Claude, 429, None));
+        assert!(
+            matches!(nexus.read(Provider::Claude), Output::Read(read)
+                if read.turn_end_subscription == TurnEndSubscription::Mismatched(mismatch(4_800))),
+            "a read answered with the reading held says it is stale"
+        );
+        nexus.turn_ends_held();
+        assert_eq!(carried(&nexus), TurnEndSubscription::Held);
         let _ = std::fs::remove_dir_all(&root);
     }
 

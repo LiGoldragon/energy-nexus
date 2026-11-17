@@ -1,6 +1,6 @@
 [package]
 name="energy-nexus-translator"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace=true
 rust-version.workspace=true
 build = "build.rs"
@@ -25,6 +25,7 @@ time={version="0.3",features=["parsing"]}
 tempfile="3"
 nix={version="0.30",features=["socket","signal","inotify","event"]}
 rkyv.workspace=true
+jiff.workspace=true
 
 [build-dependencies]
 ethos-zero={git="https://github.com/LiGoldragon/ethos-zero",rev="970459d"}

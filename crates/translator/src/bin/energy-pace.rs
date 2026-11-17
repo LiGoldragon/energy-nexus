@@ -2,7 +2,7 @@ use datom_codec::{Actualizing, Potential};
 use energy_nexus_translator::cli::ConfiguredPlace;
 use energy_nexus_translator::{TextClienting, Translator};
 use energy_nexus_wire::Place;
-use signal_energy_nexus::{Decimating, Output, Provider, Standing, Target};
+use signal_energy_nexus::{Decimating, Output, Provider, Standing, Target, TurnEndSubscription};
 
 fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::Read_Data, String> {
     let text = match provider {
@@ -30,7 +30,41 @@ fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::
     }
 }
 
+/// When the reading was read, and how long ago, in the system's zone; and,
+/// when Flow's turn ends do not reach the Nexus, that the reading is stale
+/// and since when.
+fn when(read: &signal_energy_nexus::Read_Data) {
+    let zone = jiff::tz::TimeZone::system();
+    let local = |seconds: i64| match jiff::Timestamp::from_second(seconds) {
+        Ok(instant) => instant.to_zoned(zone.clone()).strftime("%Y-%m-%d %H:%M %Z").to_string(),
+        Err(_) => format!("instant {seconds}"),
+    };
+    let at = read.reading.at.0 .0;
+    let age = jiff::Timestamp::now().as_second() - at;
+    let age = if age < 3_600 {
+        format!("{} minutes", age / 60)
+    } else {
+        format!("{:.1} hours", age as f64 / 3_600.0)
+    };
+    match &read.turn_end_subscription {
+        TurnEndSubscription::Held => {
+            println!("{:?} read at {}, {age} ago.", read.reading.provider, local(at))
+        }
+        TurnEndSubscription::Mismatched(mismatch) => println!(
+            "{:?} STALE: read at {}, {age} ago. Flow has refused Energy's turn-end subscription \
+             since {}, contract mismatch (Flow {}, Energy {}): no reading is taken until both \
+             speak one contract.",
+            read.reading.provider,
+            local(at),
+            local(mismatch.since.0 .0),
+            mismatch.flow_contract.0 .0,
+            mismatch.own_contract.0 .0
+        ),
+    }
+}
+
 fn show(read: signal_energy_nexus::Read_Data) {
+    when(&read);
     for pace in read.pace_vector {
         let window = read
             .reading

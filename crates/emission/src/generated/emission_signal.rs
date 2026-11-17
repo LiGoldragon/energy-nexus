@@ -26,6 +26,7 @@ pub enum Output {
     TurnEndsObserved(std::vec::Vec<TurnEnd>),
     TurnEnded(TurnEnd),
     Down,
+    TurnEndsRefused(signal_energy_nexus::ContractMismatch),
 }
 #[rustfmt::skip]
 #[allow(clippy::result_large_err, clippy::ptr_arg, clippy::borrowed_box)]
