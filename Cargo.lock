@@ -129,7 +129,7 @@ dependencies = [
  "meta-signal-energy-nexus",
  "rkyv",
  "signal-energy-nexus",
- "signal-flow 64.0.0",
+ "signal-flow 67.0.0",
 ]
 
 [[package]]
@@ -145,7 +145,7 @@ dependencies = [
  "rkyv",
  "signal",
  "signal-energy-nexus",
- "signal-flow 64.0.0",
+ "signal-flow 67.0.0",
  "tempfile",
  "tokio",
 ]
@@ -177,7 +177,7 @@ dependencies = [
  "serde_json",
  "signal",
  "signal-energy-nexus",
- "signal-flow 64.0.0",
+ "signal-flow 67.0.0",
  "tempfile",
  "time",
  "ureq",
@@ -823,8 +823,8 @@ dependencies = [
 
 [[package]]
 name = "signal-flow"
-version = "64.0.0"
-source = "git+https://github.com/LiGoldragon/signal-flow?rev=83c04fefc087cf76dd3ca04792ff38b53b283b74#83c04fefc087cf76dd3ca04792ff38b53b283b74"
+version = "67.0.0"
+source = "git+https://github.com/LiGoldragon/signal-flow?rev=a536862f00704f0ea2a805484d2a61f9e5dd382a#a536862f00704f0ea2a805484d2a61f9e5dd382a"
 dependencies = [
  "datom-codec",
  "ethos-zero 27.0.0",
