@@ -10,7 +10,7 @@ rust-version = "1.89"
 signal-energy-nexus = { git = "https://github.com/LiGoldragon/signal-energy-nexus", rev = "87f3c38a820d747e2c65f417e74412a92be0bb7e", default-features = false }
 meta-signal-energy-nexus = { git = "https://github.com/LiGoldragon/meta-signal-energy-nexus", rev = "a159fa432eb16ecd801f328768459b233f35297c", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
-signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "a536862f00704f0ea2a805484d2a61f9e5dd382a", default-features = false }
+signal-flow = { git = "https://github.com/LiGoldragon/signal-flow", rev = "319e3c3f8502e1c4356bd499bf8949905e6fd3c8", default-features = false }
 # The owner's time zone: the system's, or a configured IANA name read from the
 # bundled database, so a name resolves alike on every host and in every build.
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
