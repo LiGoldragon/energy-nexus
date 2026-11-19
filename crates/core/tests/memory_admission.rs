@@ -103,7 +103,7 @@ fn upgraded(root: &Root, bytes: &[u8]) -> (Memory, Vec<NotCarried>) {
 fn written_in_the_envelope(root: &Root, memory: &Memory) {
     let bytes = std::fs::read(root.memory()).unwrap();
     assert_eq!(&bytes[..8], b"ENXMEMRY");
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
+    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 5);
     match Memory::load(&root.memory()).unwrap() {
         Admission::Admitted(reopened) => {
             assert_eq!(reopened.configuration(), memory.configuration());

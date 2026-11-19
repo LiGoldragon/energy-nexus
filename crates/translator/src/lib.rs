@@ -1,7 +1,8 @@
 use datom_codec::{Actualizing, Potential};
 use energy_nexus_emission::{
-    Cause, ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission,
-    Emittable, Failure, HttpStatus, Input as EmissionInput, Observation, Outcome,
+    Cause, ClaudeApiCost, ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption,
+    CostOutcome, Delivery, Emission, Emittable, Failure, HttpStatus, Input as EmissionInput,
+    Observation, OpenAiApiCost, Outcome, Since,
     Output as EmissionOutput, RetryAfter, Seconds, Send, SendFault, Status, TurnEnd,
 };
 use energy_nexus_wire::{
@@ -95,6 +96,8 @@ impl Translating for Translator {
             Emission::CodexRateLimits(value) => Outcome::CodexRateLimitsObserved(value.emit(self)),
             Emission::CodexConsumeReset(value) => Outcome::CodexResetConsumed(value.emit(self)),
             Emission::ClaudeUsage(value) => Outcome::ClaudeUsageObserved(value.emit(self)),
+            Emission::ClaudeApiCost(value) => Outcome::ClaudeApiCostObserved(value.emit(self)),
+            Emission::OpenAiApiCost(value) => Outcome::OpenAiApiCostObserved(value.emit(self)),
             Emission::Send(value) => Outcome::ReminderSent(value.emit(self)),
             Emission::SendFault(value) => Outcome::FaultSent(value.emit(self)),
         }
@@ -296,6 +299,16 @@ impl Emittable<Translator> for ClaudeUsage {
             Ok(reading) => Observation::Observed(reading),
             Err(failure) => down(Provider::Claude, failure),
         }
+    }
+}
+impl Emittable<Translator> for ClaudeApiCost {
+    fn emit(&self, _: &Translator) -> CostOutcome {
+        CostOutcome::Unavailable
+    }
+}
+impl Emittable<Translator> for OpenAiApiCost {
+    fn emit(&self, _: &Translator) -> CostOutcome {
+        CostOutcome::Unavailable
     }
 }
 impl Emittable<Translator> for Send {
@@ -843,6 +856,27 @@ mod tests {
     /// program another test's fork still holds open for writing cannot be
     /// executed (ETXTBSY), so no fixture is written while another runs.
     static FIXTURE_PROGRAM: Mutex<()> = Mutex::new(());
+    #[test]
+    fn api_cost_emissions_report_unavailable_without_admin_cost_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let translator = Translator::client(Place {
+            name: energy_nexus_wire::PlaceName("cost-capability-test".into()),
+            runtime: directory.path().into(),
+            state: directory.path().into(),
+        });
+        assert_eq!(
+            translator.emit(Emission::ClaudeApiCost(ClaudeApiCost {
+                since: Since(Instant(1_795_046_400)),
+            })),
+            Outcome::ClaudeApiCostObserved(CostOutcome::Unavailable)
+        );
+        assert_eq!(
+            translator.emit(Emission::OpenAiApiCost(OpenAiApiCost {
+                since: Since(Instant(1_795_046_400)),
+            })),
+            Outcome::OpenAiApiCostObserved(CostOutcome::Unavailable)
+        );
+    }
     #[test]
     fn codex_fixture_maps_windows_and_resets() {
         let value = json!({"ordinaryUsageAllowed":false,"rateLimits":{"primary":{"usedPercent":8,"resetsAt":20,"windowDurationMins":300},"secondary":{"usedPercent":34,"resetsAt":30,"windowDurationMins":10080}},"rateLimitResetCredits":{"credits":[{"id":"rc_1","status":"available","expiresAt":40}]}});

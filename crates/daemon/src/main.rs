@@ -4,11 +4,11 @@ use energy_nexus_core::operation::{
     Faulting_Data, Operation, Outcome as OperationOutcome, Reminding_Data,
 };
 use energy_nexus_core::{
-    Configuring, Levelling, Memory, NotCarried, OwnerZone, Pacing, RedeemDecision, Redeeming, Remembering,
-    Reminding, SessionFault,
+    Configuring, CreditAccounting, Levelling, Memory, NotCarried, OwnerZone, Pacing, RedeemDecision,
+    Redeeming, Remembering, Reminding, SessionFault,
 };
 use energy_nexus_emission::{
-    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, Delivery, Emission, Failure,
+    ClaudeUsage, CodexConsumeReset, CodexRateLimits, Consumption, CostOutcome, Delivery, Emission, Failure,
     Idempotency, Input as EmissionInput, Observation, Outcome as ExternalOutcome,
     Output as EmissionOutput, Send, SendFault,
 };
@@ -21,8 +21,8 @@ use energy_nexus_wire::{
 };
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_energy_nexus::{
-    Answerable, Call, Changed_Data, ContractMismatch, Instant, Output, Provider, Read_Data,
-    Refused, Reset, TurnEndSubscription,
+    Answerable, Balance, BalanceRefused, Call, Changed_Data, ContractMismatch, Credit, Instant,
+    Output, Provider, Read_Data, Refused, Reset, TurnEndSubscription,
 };
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
@@ -142,6 +142,36 @@ impl Nexus {
                 let emission = match provider {
                     Provider::Codex => Emission::CodexRateLimits(CodexRateLimits {}),
                     Provider::Claude => Emission::ClaudeUsage(ClaudeUsage {}),
+                    Provider::ClaudeApi | Provider::OpenAiApi => {
+                        let now = Instant((self.now)());
+                        let mut candidate = self.memory.clone();
+                        match candidate.advance_expired(now) {
+                            Ok(changed) if changed.is_empty() => {}
+                            Ok(_) => match self.commit(candidate) {
+                                Ok(()) => {}
+                                Err(refusal) => {
+                                    return OperationOutcome::Failed(Refused::RuleRefused(
+                                        format!("memory not persisted: {refusal}"),
+                                    ));
+                                }
+                            },
+                            Err(reason) => {
+                                return OperationOutcome::Failed(Refused::RuleRefused(reason));
+                            }
+                        }
+                        return match self.memory.reading_for(&provider, now) {
+                            Ok(reading) => OperationOutcome::Read(reading),
+                            Err(BalanceRefused::NoCredit(provider)) => {
+                                OperationOutcome::Failed(Refused::NoCredit(provider))
+                            }
+                            Err(BalanceRefused::SpentUnavailable(provider)) => {
+                                OperationOutcome::Failed(Refused::SpentUnavailable(provider))
+                            }
+                            Err(BalanceRefused::ProviderDown(provider)) => {
+                                OperationOutcome::Failed(Refused::ProviderDown(provider))
+                            }
+                        };
+                    }
                 };
                 match self.emit(emission) {
                     Ok(ExternalOutcome::CodexRateLimitsObserved(Observation::Observed(reading)))
@@ -227,6 +257,9 @@ trait Acting {
     /// The reading held, for the journal: its age at `now`, or none held.
     fn held(&self, provider: &Provider, now: i64) -> String;
     fn redeem(&mut self, provider: Provider) -> Output;
+    /// The configured grant and its observed spend, after any monthly
+    /// boundary due at the question's instant has been persisted.
+    fn balance(&mut self, provider: &Provider) -> Result<Balance, BalanceRefused>;
 }
 impl Acting for Nexus {
     fn held(&self, provider: &Provider, now: i64) -> String {
@@ -322,6 +355,18 @@ impl Acting for Nexus {
             _ => Output::Refused(Refused::NoReset),
         }
     }
+    fn balance(&mut self, provider: &Provider) -> Result<Balance, BalanceRefused> {
+        let now = Instant((self.now)());
+        let mut candidate = self.memory.clone();
+        match candidate.advance_expired(now) {
+            Ok(changed) if changed.is_empty() => {}
+            Ok(_) => self.commit(candidate).map_err(|_| {
+                BalanceRefused::ProviderDown(provider.clone())
+            })?,
+            Err(_) => return Err(BalanceRefused::ProviderDown(provider.clone())),
+        }
+        self.memory.balance_for(provider, now)
+    }
 }
 /// The schedule's reads and answers, made on the Nexus off the schedule's
 /// thread: a provider call blocks.
@@ -347,6 +392,18 @@ impl Reads for Daemon {
         })
         .await
         .unwrap_or(down)
+    }
+    fn credits(&self) -> Vec<Credit> {
+        self.0
+            .lock()
+            .map(|nexus| nexus.memory.credits())
+            .unwrap_or_default()
+    }
+    fn credit(&self, provider: &Provider) -> Option<Credit> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|nexus| nexus.memory.credit_for(provider).cloned())
     }
 }
 /// Holds Flow's turn ends open through the translator, `TurnEnds`, and
@@ -455,9 +512,9 @@ impl Serving for Place {
         // stale one a crashed daemon left there.
         let public = PlacedSocket::at(&self.public())?.claim()?;
         let meta = PlacedSocket::at(&self.meta())?.claim()?;
-        let latest = [Provider::Claude, Provider::Codex]
+        let latest = memory
+            .latest_vector
             .iter()
-            .filter_map(|provider| memory.latest(provider))
             .map(|latest| latest.reading.clone())
             .collect();
         let nexus = Arc::new(Mutex::new(Nexus {
@@ -488,10 +545,12 @@ impl Serving for Place {
         }
         {
             let nexus = Arc::clone(&nexus);
+            let events = events.clone();
             std::thread::spawn(move || {
                 for stream in meta.incoming().flatten() {
                     let nexus = Arc::clone(&nexus);
-                    std::thread::spawn(move || serve_meta(stream, nexus));
+                    let events = events.clone();
+                    std::thread::spawn(move || serve_meta(stream, nexus, events));
                 }
             });
         }
@@ -532,6 +591,20 @@ impl signal_energy_nexus::Answering for Public<'_> {
             other => Err(other),
         }
     }
+    fn balance(&self, provider: &Provider) -> Result<Balance, Output> {
+        let mut nexus = self
+            .nexus
+            .lock()
+            .map_err(|_| Output::BalanceRefused(BalanceRefused::ProviderDown(provider.clone())))?;
+        let prior = nexus.memory.credit_for(provider).cloned();
+        let answer = nexus.balance(provider);
+        if let Some(credit) = nexus.memory.credit_for(provider).cloned() {
+            if prior.as_ref() != Some(&credit) {
+                let _ = self.events.send(Event::CreditChanged(credit));
+            }
+        }
+        answer.map_err(Output::BalanceRefused)
+    }
 }
 fn serve_public(
     mut stream: UnixStream,
@@ -557,7 +630,11 @@ fn serve_public(
         }
     }
 }
-fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
+fn serve_meta(
+    mut stream: UnixStream,
+    nexus: Arc<Mutex<Nexus>>,
+    events: tokio::sync::mpsc::UnboundedSender<Event>,
+) {
     let Ok(bytes) = stream.read_frame() else {
         return;
     };
@@ -570,7 +647,19 @@ fn serve_meta(mut stream: UnixStream, nexus: Arc<Mutex<Nexus>>) {
             let mut candidate = n.memory.clone();
             match candidate.configure(set, Instant(WallClock::default().unix_now())) {
                 Ok(applied) => match n.commit(candidate) {
-                    Ok(()) => meta_signal_energy_nexus::Output::Configured(applied),
+                    Ok(()) => {
+                        let provider = match &applied {
+                            meta_signal_energy_nexus::Set::Credit(credit) => Some(credit.provider.clone()),
+                            meta_signal_energy_nexus::Set::Spent(spent) => Some(spent.provider.clone()),
+                            _ => None,
+                        };
+                        if let Some(provider) = provider {
+                            if let Some(credit) = n.memory.credit_for(&provider).cloned() {
+                                let _ = events.send(Event::CreditChanged(credit));
+                            }
+                        }
+                        meta_signal_energy_nexus::Output::Configured(applied)
+                    }
                     Err(refusal) => meta_signal_energy_nexus::Output::ConfigureRefused(
                         ConfigureRefused::RuleRefused(format!("memory not persisted: {refusal}")),
                     ),
@@ -627,6 +716,76 @@ mod tests {
                 state: root.to_owned(),
             },
         }
+    }
+
+    #[test]
+    fn a_committed_credit_or_spend_wakes_its_provider_and_a_refusal_does_not() {
+        let root = std::env::temp_dir().join(format!("energy-meta-credit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nexus = Arc::new(Mutex::new(nexus(&root)));
+        let (events, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        let now = WallClock::default().unix_now();
+        let credit = Credit {
+            provider: Provider::ClaudeApi,
+            granted: signal_energy_nexus::Cents(20_000),
+            starts: signal_energy_nexus::Starts(Instant(now)),
+            expires: signal_energy_nexus::Expires(Instant(now + 86_400)),
+            renewal: signal_energy_nexus::Renewal::Once,
+            lead_time_option: None,
+        };
+
+        let configure = |set: meta_signal_energy_nexus::Set| {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let nexus = Arc::clone(&nexus);
+            let events = events.clone();
+            std::thread::spawn(move || serve_meta(server, nexus, events));
+            let call = meta_signal_energy_nexus::Call {
+                caller: signal_energy_nexus::Caller {
+                    process_id: signal_energy_nexus::ProcessId(9),
+                    user_id: signal_energy_nexus::UserId(7),
+                },
+                input: meta_signal_energy_nexus::Input::Configure(set),
+            };
+            let signal = call.signalize().unwrap();
+            client.write_frame(signal.bytes()).unwrap();
+            Signal::<meta_signal_energy_nexus::Output>::from(client.read_frame().unwrap())
+                .restore()
+                .unwrap()
+        };
+
+        assert!(matches!(
+            configure(meta_signal_energy_nexus::Set::Credit(credit.clone())),
+            meta_signal_energy_nexus::Output::Configured(meta_signal_energy_nexus::Set::Credit(_))
+        ));
+        let Event::CreditChanged(configured) = inbox.try_recv().unwrap() else {
+            panic!("a committed credit is an event to the schedule");
+        };
+        assert_eq!(configured.provider, Provider::ClaudeApi);
+        assert_eq!(configured.lead_time_option, Some(signal_energy_nexus::Minutes(10_080)));
+
+        let spent = signal_energy_nexus::Spent {
+            provider: Provider::ClaudeApi,
+            cents: signal_energy_nexus::Cents(13),
+            at: signal_energy_nexus::At(Instant(now)),
+        };
+        assert!(matches!(
+            configure(meta_signal_energy_nexus::Set::Spent(spent.clone())),
+            meta_signal_energy_nexus::Output::Configured(meta_signal_energy_nexus::Set::Spent(_))
+        ));
+        assert!(matches!(
+            inbox.try_recv().unwrap(),
+            Event::CreditChanged(Credit { provider: Provider::ClaudeApi, .. })
+        ));
+
+        assert!(matches!(
+            configure(meta_signal_energy_nexus::Set::Spent(signal_energy_nexus::Spent {
+                cents: signal_energy_nexus::Cents(-1),
+                ..spent
+            })),
+            meta_signal_energy_nexus::Output::ConfigureRefused(_)
+        ));
+        assert!(inbox.try_recv().is_err(), "refused configuration wakes nothing");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn reading(used: i64) -> Reading {
@@ -733,6 +892,8 @@ mod tests {
         match provider {
             Provider::Codex => ExternalOutcome::CodexRateLimitsObserved(Observation::Down(failure)),
             Provider::Claude => ExternalOutcome::ClaudeUsageObserved(Observation::Down(failure)),
+            Provider::ClaudeApi => ExternalOutcome::ClaudeApiCostObserved(CostOutcome::Down),
+            Provider::OpenAiApi => ExternalOutcome::OpenAiApiCostObserved(CostOutcome::Down),
         }
     }
 

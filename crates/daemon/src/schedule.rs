@@ -1,15 +1,18 @@
-//! When Energy reads a provider: on three events, never on an interval.
+//! When Energy reads a provider: on events, never on an interval.
 //!
 //! - A turn ends on the provider (Flow's `Observe.TurnEnds`, through the
 //!   translator). A turn end that arrives while a read of that provider is in
 //!   flight marks it for one more read when that one ends, so a burst of turn
 //!   ends is one read and at most one follow-up. When Flow comes back after
 //!   going, its new opening is taken as the first one was.
-//! - Its window resets. Each reading says when its provider's next window
-//!   resets; the provider's alarm is set for that wall-clock instant and reads
-//!   once when it fires. A newer reading replaces the alarm. The alarm is on
-//!   the wall clock, absolute, so a suspend or a clock step does not make it
-//!   late: it fires at the instant, or at once on waking when that has passed.
+//! - Its next window or credit boundary. A subscription reading schedules a
+//!   provider window reset; a configured credit schedules its start, Low lead
+//!   and expiry. One wall-clock alarm reads once at the next boundary. A newer
+//!   reading or grant replaces it. The alarm is absolute, so a suspend or a
+//!   clock step does not make it late: it fires at the instant, or at once on
+//!   waking when that has passed.
+//! - A Credit or Spent meta commit. Once persisted, the grant's provider is
+//!   re-armed and refreshed from the new configuration.
 //! - A question: `Read.Provider` is answered from memory, unless the latest
 //!   reading is older than the last turn end on the provider (or there is
 //!   none), when it is read first.
@@ -19,9 +22,10 @@
 //! a failed read sets no alarm and starts no read of its own.
 //!
 //! When nothing happens, nothing is read.
-use energy_nexus_core::Resetting;
+use energy_nexus_core::{CreditAccounting, CreditTiming, Resetting};
 use energy_nexus_emission::TurnEnd;
-use signal_energy_nexus::{Provider, Reading, Refused, Output};
+use signal_energy_nexus::{Credit, Instant, Provider, Reading, Refused, Output};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -38,9 +42,12 @@ pub enum Event {
     Question(Provider, oneshot::Sender<Output>),
     /// A read the schedule started has ended.
     Finished(Provider, Output),
-    /// The provider's alarm fired: its window reset, if the alarm is still
-    /// the one set (a newer reading may have moved it).
-    WindowReset(Provider),
+    /// The provider's window or credit boundary fired, if its alarm is still
+    /// the one set (a newer reading or grant may have moved it).
+    WindowBoundary(Provider),
+    /// A configured grant or spend observation changed; refresh its alarm
+    /// and reading from the persisted configuration.
+    CreditChanged(Credit),
 }
 
 /// The reads the schedule asks for, and the answers from memory.
@@ -49,19 +56,23 @@ pub trait Reads: Clone + Send + Sync + 'static {
     fn read(&self, provider: Provider) -> impl Future<Output = Output> + Send;
     /// The latest reading in memory, answered as a `Read`.
     fn recall(&self, provider: Provider) -> impl Future<Output = Output> + Send;
+    /// The configured credit periods used to arm start, Low and expiry events.
+    fn credits(&self) -> Vec<Credit>;
+    /// The current configured credit after a read may have crossed renewal.
+    fn credit(&self, provider: &Provider) -> Option<Credit>;
 }
 
 /// Wall time in Unix seconds, which readings and turn ends are stamped in,
-/// and one alarm per provider at a wall-clock instant.
+/// and one alarm per provider at its next scheduled boundary.
 pub trait Clock: Send + 'static {
     fn unix_now(&self) -> i64;
     /// Sets the provider's alarm at `at`, Unix seconds, replacing the one
     /// set before, or clears it (`None`). A fired alarm is sent on `events`
-    /// as `WindowReset`.
+    /// as `WindowBoundary`.
     fn alarm(&mut self, provider: &Provider, at: Option<i64>, events: &mpsc::UnboundedSender<Event>);
 }
 /// The system's wall clock. Each provider's alarm is a timerfd on
-/// `CLOCK_REALTIME`, set with `TFD_TIMER_ABSTIME` at the reset's Unix instant:
+/// `CLOCK_REALTIME`, set with `TFD_TIMER_ABSTIME` at the next boundary's Unix instant:
 /// the kernel holds the instant, not a length of time, so it fires at that
 /// wall-clock moment whatever happens between (a suspend, an NTP step), or
 /// at once on resume when the moment passed during it. One thread per
@@ -83,7 +94,7 @@ impl WallClock {
         let timer = match TimerFd::new(ClockId::CLOCK_REALTIME, TimerFlags::TFD_CLOEXEC) {
             Ok(timer) => Arc::new(timer),
             Err(error) => {
-                eprintln!("energy-nexus: no window-reset alarm for {provider:?}: {error}");
+                eprintln!("energy-nexus: no window-boundary alarm for {provider:?}: {error}");
                 return None;
             }
         };
@@ -93,7 +104,7 @@ impl WallClock {
         // Each pass blocks in read(2) until the alarm's instant.
         std::thread::spawn(move || {
             while fired.wait().is_ok() {
-                if events.send(Event::WindowReset(named.clone())).is_err() {
+                if events.send(Event::WindowBoundary(named.clone())).is_err() {
                     return;
                 }
             }
@@ -125,7 +136,7 @@ impl Clock for WallClock {
             None => timer.unset(),
         };
         if let Err(error) = set {
-            eprintln!("energy-nexus: the window-reset alarm for {provider:?} is not set: {error}");
+            eprintln!("energy-nexus: the window-boundary alarm for {provider:?} is not set: {error}");
         }
     }
 }
@@ -142,9 +153,9 @@ struct Track {
     again: bool,
     /// Questions waiting on the read in flight.
     waiting: Vec<oneshot::Sender<Output>>,
-    /// The moment the next window resets, from the latest reading: the
-    /// instant the provider's alarm is set at.
-    resets_at: Option<i64>,
+    /// The next window or credit boundary, the instant the provider's alarm
+    /// is set at.
+    alarm_at: Option<i64>,
 }
 impl Track {
     /// The latest reading is not known to be newer than the last turn end.
@@ -162,8 +173,8 @@ impl Track {
 pub struct Schedule<R: Reads, C: Clock> {
     reads: R,
     clock: C,
-    claude: Track,
-    codex: Track,
+    tracks: HashMap<Provider, Track>,
+    credits: Vec<Credit>,
     events: mpsc::UnboundedSender<Event>,
     inbox: mpsc::UnboundedReceiver<Event>,
 }
@@ -176,8 +187,8 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
         let mut schedule = Self {
             reads,
             clock,
-            claude: Track::default(),
-            codex: Track::default(),
+            tracks: HashMap::new(),
+            credits: Vec::new(),
             events,
             inbox,
         };
@@ -191,33 +202,41 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
         self.events.clone()
     }
     fn track(&mut self, provider: &Provider) -> &mut Track {
-        match provider {
-            Provider::Claude => &mut self.claude,
-            Provider::Codex => &mut self.codex,
-        }
+        self.tracks.entry(provider.clone()).or_default()
     }
     /// Runs for as long as the daemon does, taking each event as it comes;
-    /// window resets come as events from the clock's alarms.
+    /// scheduled boundaries come as events from the clock's alarms.
     pub async fn run(mut self) {
+        for credit in self.reads.credits() {
+            self.on(Event::CreditChanged(credit));
+        }
         while let Some(event) = self.inbox.recv().await {
             self.on(event);
         }
     }
     /// A reading is the provider's latest: its time, and its next window
-    /// reset as the provider's alarm.
+    /// reset or credit boundary as the provider's alarm.
     /// Only a reading newer than the one known is: the reading a failed read
     /// answers with is the one already held, and moves nothing.
     fn reading(&mut self, reading: &Reading) {
-        let resets = reading.next_reset().map(|instant| instant.0);
+        let boundary = match &reading.provider {
+            Provider::ClaudeApi | Provider::OpenAiApi => self
+                .credits
+                .iter()
+                .find(|credit| credit.provider == reading.provider)
+                .and_then(|credit| credit.next_transition(reading.at.0))
+                .map(|instant| instant.0),
+            Provider::Claude | Provider::Codex => reading.next_reset().map(|instant| instant.0),
+        };
         let track = self.track(&reading.provider);
         if track.read_at.is_some_and(|known| reading.at.0.0 <= known) {
             return;
         }
         track.read_at = Some(reading.at.0.0);
-        self.resets(&reading.provider, resets);
+        self.arm(&reading.provider, boundary);
     }
-    fn resets(&mut self, provider: &Provider, at: Option<i64>) {
-        self.track(provider).resets_at = at;
+    fn arm(&mut self, provider: &Provider, at: Option<i64>) {
+        self.track(provider).alarm_at = at;
         self.clock.alarm(provider, at, &self.events);
     }
     fn on(&mut self, event: Event) {
@@ -256,6 +275,9 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
                 self.track(&provider).in_flight = false;
                 if let Output::Read(read) = &response {
                     self.reading(&read.reading);
+                    if let Some(credit) = self.reads.credit(&provider) {
+                        self.credit_changed(credit, false);
+                    }
                 }
                 let track = self.track(&provider);
                 if track.again {
@@ -267,17 +289,41 @@ impl<R: Reads, C: Clock> Schedule<R, C> {
                     }
                 }
             }
-            Event::WindowReset(provider) => {
+            Event::WindowBoundary(provider) => {
                 let now = self.clock.unix_now();
-                if self.track(&provider).resets_at.is_some_and(|at| at <= now) {
-                    self.reset(provider);
+                if self.track(&provider).alarm_at.is_some_and(|at| at <= now) {
+                    self.boundary(provider);
                 }
             }
+            Event::CreditChanged(credit) => self.credit_changed(credit, true),
         }
     }
-    /// The provider's window reset: its alarm is spent, and it is read.
-    fn reset(&mut self, provider: Provider) {
-        self.resets(&provider, None);
+    /// One configured credit is the source for the schedule's next alarm;
+    /// `refresh` starts a reading for a new or changed grant.
+    fn credit_changed(&mut self, credit: Credit, refresh: bool) {
+        let provider = credit.provider.clone();
+        self.credits
+            .retain(|known| known.provider != provider);
+        self.credits.push(credit.clone());
+        self.arm(
+            &provider,
+            credit.next_transition(Instant(self.clock.unix_now())).map(|instant| instant.0),
+        );
+        if refresh {
+            self.want(provider);
+        }
+    }
+    /// The provider's scheduled boundary: the next configured credit
+    /// transition is armed before the read, so a refused refresh still leaves
+    /// the later Low or expiry event scheduled.
+    fn boundary(&mut self, provider: Provider) {
+        let now = Instant(self.clock.unix_now());
+        let next = self
+            .reads
+            .credit(&provider)
+            .and_then(|credit| credit.next_transition(now))
+            .map(|instant| instant.0);
+        self.arm(&provider, next);
         self.want(provider);
     }
     /// A read is wanted: started now, or owed once the one in flight ends.
@@ -359,7 +405,7 @@ mod tests {
                 let named = provider.clone();
                 let task = tokio::spawn(async move {
                     tokio::time::sleep_until(deadline).await;
-                    let _ = events.send(Event::WindowReset(named));
+                    let _ = events.send(Event::WindowBoundary(named));
                 });
                 self.alarms.push((provider.clone(), task));
             }
@@ -388,7 +434,7 @@ mod tests {
             self.alarms.lock().unwrap().retain(|(provider, at, events)| {
                 let due = *at <= unix;
                 if due {
-                    let _ = events.send(Event::WindowReset(provider.clone()));
+                    let _ = events.send(Event::WindowBoundary(provider.clone()));
                 }
                 !due
             });
@@ -506,6 +552,34 @@ mod tests {
                 None => Output::Refused(Refused::ProviderDown(provider)),
             }
         }
+        fn credits(&self) -> Vec<Credit> {
+            Vec::new()
+        }
+        fn credit(&self, _: &Provider) -> Option<Credit> {
+            None
+        }
+    }
+
+    /// A configured grant layered over the ordinary reader fake. Its window
+    /// boundaries come from the grant, not the fake provider's session reset.
+    #[derive(Clone)]
+    struct CreditProvided {
+        provided: Provided,
+        credit: Credit,
+    }
+    impl Reads for CreditProvided {
+        async fn read(&self, provider: Provider) -> Output {
+            self.provided.read(provider).await
+        }
+        async fn recall(&self, provider: Provider) -> Output {
+            self.provided.recall(provider).await
+        }
+        fn credits(&self) -> Vec<Credit> {
+            vec![self.credit.clone()]
+        }
+        fn credit(&self, provider: &Provider) -> Option<Credit> {
+            (&self.credit.provider == provider).then(|| self.credit.clone())
+        }
     }
 
     /// Lets every task run until all wait: with time paused, the clock only
@@ -603,6 +677,44 @@ mod tests {
                 (Provider::Claude, START + 3_600 + 5 * 3_600)
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_api_credit_keeps_scheduling_boundaries_when_each_read_is_refused() {
+        let provided = Provided::new(0);
+        *provided.down.lock().unwrap() = true;
+        let credit = Credit {
+            provider: Provider::ClaudeApi,
+            granted: signal_energy_nexus::Cents(20_000),
+            starts: signal_energy_nexus::Starts(Instant(START + 3_600)),
+            expires: signal_energy_nexus::Expires(Instant(START + 4 * 3_600)),
+            renewal: signal_energy_nexus::Renewal::Once,
+            lead_time_option: Some(signal_energy_nexus::Minutes(60)),
+        };
+        let schedule = Schedule::new(
+            CreditProvided {
+                provided: provided.clone(),
+                credit,
+            },
+            PausedClock::at(START),
+            Vec::new(),
+        );
+        tokio::spawn(schedule.run());
+        settle().await;
+        assert_eq!(provided.count(&Provider::ClaudeApi), 1, "initial configuration refresh");
+
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+        settle().await;
+        assert_eq!(provided.count(&Provider::ClaudeApi), 2, "period starts");
+
+        tokio::time::sleep(Duration::from_secs(2 * 3_600)).await;
+        settle().await;
+        assert_eq!(provided.count(&Provider::ClaudeApi), 3, "per-credit Low lead begins");
+
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+        settle().await;
+        assert_eq!(provided.count(&Provider::ClaudeApi), 4, "credit expires");
+        assert_eq!(provided.count(&Provider::Codex), 0, "only its API provider is read");
     }
 
     #[tokio::test(start_paused = true)]
@@ -790,7 +902,7 @@ mod tests {
         );
         let events = schedule.sender();
         tokio::spawn(schedule.run());
-        events.send(Event::WindowReset(Provider::Claude)).unwrap();
+        events.send(Event::WindowBoundary(Provider::Claude)).unwrap();
         settle().await;
         assert!(provided.reads().is_empty());
     }
@@ -812,13 +924,13 @@ mod tests {
         let fired = tokio::time::timeout(Duration::from_secs(30), inbox.recv())
             .await
             .expect("the alarm fires");
-        assert!(matches!(fired, Some(Event::WindowReset(Provider::Claude))));
+        assert!(matches!(fired, Some(Event::WindowBoundary(Provider::Claude))));
         assert!(clock.unix_now() >= instant, "not before its instant");
         // An instant already passed fires at once.
         clock.alarm(&Provider::Codex, Some(instant - 600), &events);
         let fired = tokio::time::timeout(Duration::from_secs(30), inbox.recv())
             .await
             .expect("a passed instant fires at once");
-        assert!(matches!(fired, Some(Event::WindowReset(Provider::Codex))));
+        assert!(matches!(fired, Some(Event::WindowBoundary(Provider::Codex))));
     }
 }

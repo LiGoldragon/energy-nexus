@@ -120,7 +120,7 @@ checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
 name = "energy-nexus-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "datom-codec",
  "energy-nexus-wire",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-daemon"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "energy-nexus-core",
  "energy-nexus-emission",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-emission"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "datom-codec",
  "ethos-zero 28.0.0",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "energy-nexus-translator"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "datom-codec",
  "energy-nexus-emission",
@@ -458,8 +458,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-energy-nexus"
-version = "0.7.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=a159fa432eb16ecd801f328768459b233f35297c#a159fa432eb16ecd801f328768459b233f35297c"
+version = "0.8.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-energy-nexus?rev=05d8c5caa5328e056d84a6d6942cb3f0ba8d3dbb#05d8c5caa5328e056d84a6d6942cb3f0ba8d3dbb"
 dependencies = [
  "datom-codec",
  "ethos-zero 28.0.0",
@@ -797,8 +797,8 @@ dependencies = [
 
 [[package]]
 name = "signal-energy-nexus"
-version = "0.8.0"
-source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=87f3c38a820d747e2c65f417e74412a92be0bb7e#87f3c38a820d747e2c65f417e74412a92be0bb7e"
+version = "0.9.0"
+source = "git+https://github.com/LiGoldragon/signal-energy-nexus?rev=5927259e5c91c13c02707db2b185803d06d471a7#5927259e5c91c13c02707db2b185803d06d471a7"
 dependencies = [
  "datom-codec",
  "ethos-zero 28.0.0",

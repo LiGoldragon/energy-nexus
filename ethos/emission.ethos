@@ -1,21 +1,30 @@
 Emission
-[ signal_energy_nexus:[ Reading ResetId Recipient Level Provider Reset ] ] ; imports the Energy vocabulary
+[ signal_energy_nexus:[ Reading ResetId Recipient Level Provider Reset Cents ] ] ; imports the Energy vocabulary
 [ CodexRateLimits                                          ; one external call per emission, the n-th outcome its own
   CodexConsumeReset
   ClaudeUsage
+  ClaudeApiCost
+  OpenAiApiCost
   Send
   SendFault ]
 [ CodexRateLimitsObserved.Observation                      ; Codex's rate limits, read through its app-server
   CodexResetConsumed.Consumption                           ; one reset consumed, idempotently
   ClaudeUsageObserved.Observation                          ; Claude's usage, read with its credentials
+  ClaudeApiCostObserved.CostOutcome                        ; Claude API costs since the requested instant
+  OpenAiApiCostObserved.CostOutcome                         ; OpenAI API costs since the requested instant
   ReminderSent.Delivery                                    ; one reminder sent through the Flow Nexus client
   FaultSent.Delivery ]                                     ; one Session-spent fault sent through the Flow Nexus client
 [ CodexRateLimits.{}                                       ; carries nothing, so that it bears Emittable
   ClaudeUsage.{}                                           ; carries nothing, so that it bears Emittable
+  ClaudeApiCost.{ Since.Instant }                          ; a cost observation for the requested period
+  OpenAiApiCost.{ Since.Instant }                          ; a cost observation for the requested period
   CodexConsumeReset.{ ResetId Idempotency.String }
   Send.{ Recipient Provider Level }
   SendFault.{ Recipient Provider }                         ; the provider's Session is spent out: a fault in the pace of work
   Observation.[ Observed.Reading Down.Failure ]            ; what the translator observed, or the provider down and how
+  CostOutcome.[ Spent.{ Cents Since.Instant At.Instant }   ; spend for the requested period, and when it was observed
+                 Unavailable                               ; configured credentials cannot report API costs
+                 Down ]                                     ; the cost source could not be reached
   Failure.{ Cause Status.Option<HttpStatus> RetryAfter.Option<Seconds> } ; one failed reading: why, the answer's status, and when the provider said to come back
   Cause.[ Unconfigured                                     ; no program or credentials set
           CredentialsUnreadable                            ; the credentials file is missing, not JSON, or holds no token

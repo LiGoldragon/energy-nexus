@@ -13,6 +13,26 @@ pub struct CodexRateLimits {}
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct ClaudeUsage {}
 #[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ClaudeApiCost {
+    pub since: Since,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct OpenAiApiCost {
+    pub since: Since,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Since(pub signal_energy_nexus::Instant);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct At(pub signal_energy_nexus::Instant);
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Idempotency(pub String);
@@ -64,6 +84,22 @@ pub struct Failure {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Spent_Data {
+    pub cents: signal_energy_nexus::Cents,
+    pub since: Since,
+    pub at: At,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum CostOutcome {
+    Spent(Spent_Data),
+    Unavailable,
+    Down,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Cause {
     Unconfigured,
     CredentialsUnreadable,
@@ -103,6 +139,8 @@ pub enum Emission {
     CodexRateLimits(CodexRateLimits),
     CodexConsumeReset(CodexConsumeReset),
     ClaudeUsage(ClaudeUsage),
+    ClaudeApiCost(ClaudeApiCost),
+    OpenAiApiCost(OpenAiApiCost),
     Send(Send),
     SendFault(SendFault),
 }
@@ -113,6 +151,8 @@ pub enum Outcome {
     CodexRateLimitsObserved(Observation),
     CodexResetConsumed(Consumption),
     ClaudeUsageObserved(Observation),
+    ClaudeApiCostObserved(CostOutcome),
+    OpenAiApiCostObserved(CostOutcome),
     ReminderSent(Delivery),
     FaultSent(Delivery),
 }
@@ -135,6 +175,14 @@ impl Emitted for CodexConsumeReset {
 #[rustfmt::skip]
 impl Emitted for ClaudeUsage {
     type Outcome = Observation;
+}
+#[rustfmt::skip]
+impl Emitted for ClaudeApiCost {
+    type Outcome = CostOutcome;
+}
+#[rustfmt::skip]
+impl Emitted for OpenAiApiCost {
+    type Outcome = CostOutcome;
 }
 #[rustfmt::skip]
 impl Emitted for Send {

@@ -8,6 +8,8 @@ fn read(client: &Translator, provider: Provider) -> Result<signal_energy_nexus::
     let text = match provider {
         Provider::Claude => "Read.Claude",
         Provider::Codex => "Read.Codex",
+        Provider::ClaudeApi => "Read.ClaudeApi",
+        Provider::OpenAiApi => "Read.OpenAiApi",
     };
     let answer = client
         .request(text, false, false)?
@@ -99,7 +101,7 @@ fn show(read: signal_energy_nexus::Read_Data) {
     }
 }
 
-/// `energy-pace [Claude|Codex]`: no place is typed; it is the
+/// `energy-pace [Claude|Codex|ClaudeApi|OpenAiApi]`: no place is typed; it is the
 /// configuration's, `$XDG_CONFIG_HOME/nexus/energy-nexus.datom`.
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -107,8 +109,10 @@ fn main() {
         [] => vec![Provider::Claude, Provider::Codex],
         [only] if only == "Claude" => vec![Provider::Claude],
         [only] if only == "Codex" => vec![Provider::Codex],
+        [only] if only == "ClaudeApi" => vec![Provider::ClaudeApi],
+        [only] if only == "OpenAiApi" => vec![Provider::OpenAiApi],
         _ => {
-            eprintln!("usage: energy-pace [Claude|Codex]; the place is read from $XDG_CONFIG_HOME/nexus/energy-nexus.datom");
+            eprintln!("usage: energy-pace [Claude|Codex|ClaudeApi|OpenAiApi]; the place is read from $XDG_CONFIG_HOME/nexus/energy-nexus.datom");
             std::process::exit(2)
         }
     };

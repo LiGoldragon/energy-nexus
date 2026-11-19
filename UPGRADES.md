@@ -1,5 +1,13 @@
 # Upgrades
 
+## 0.7.0 — configured API credits and Memory format version 5
+
+On signal-energy-nexus 0.9.0 (`5927259`) and meta-signal-energy-nexus 0.8.0 (`05d8c5c`).
+
+The ordinary Signal gains `Balance.Provider` and its six-field `Balance` response. The meta Signal gains `Configure.Credit` and `Configure.Spent`. API credit spend is an owner-supplied observation; Translator cost emissions answer `Unavailable` where the available credentials cannot report organization costs, and Energy never turns that into zero spend. The schedule arms start, per-grant Low-lead and expiry transitions as wall-clock events; changing a Credit or Spent setting re-arms its provider. Monthly renewal advances the prior expiry by one local calendar month in the configured owner zone, clamps at month end, and records known zero at the new period boundary.
+
+Memory format version 5 adds configured Credit and Spent vectors. The frozen version 4 layout carries every earlier field, latest reading and history item, while the new vectors begin empty. Earlier formats retain their existing upgrade paths. `crates/core/tests/credit_accounting.rs` covers unknown spend, invalid settings, pre-start availability, the independent lead override, target-derived cents per day, the local month-end renewal, transitions, and a version 4 archive. Schedule and daemon tests cover start/Low/expiry alarms and meta updates that wake the provider only after persistence. The candidate's generated files and versioned wire fixtures remain unverified until the authorized generation/build gate.
+
 ## 0.6.0 — a reading Flow's refused subscription left stale says so
 
 On signal-energy-nexus 0.8.0 (`87f3c38`) and meta-signal-energy-nexus 0.7.1 (`a159fa4`); the translator speaks signal-flow 64 to Flow 0.56 (0.5.1).

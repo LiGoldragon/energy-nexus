@@ -14,9 +14,10 @@ pub use usefulness::{ScheduleChecking, SpanReading, UsefulTime};
 use energy_nexus_wire::{Earlier, Envelope, Persisted, Upgrade};
 use meta_signal_energy_nexus::{ConfigureRefused, ProviderTarget, Set};
 use signal_energy_nexus::{
-    Baseline, Expected, Hours, HoursLeft, Instant, Left, Level, Minutes, Name, Pace, PerUsefulHour,
-    Percent, Provider, Reading, Recipient, Reminder, Reset, ResetStatus, Standing, Target,
-    Threshold, UsefulLeft, Used,
+    Balance, BalanceRefused, Baseline, Cents, Credit, Expected, Expires, Hours, HoursLeft, Instant,
+    Left, Level, Minutes, Name, Pace, PerUsefulHour, Percent, Provider, Reading, Recipient,
+    Reminder, Renewal, Reset, ResetStatus, Spent, Standing, Starts, Target, Threshold, UsefulLeft,
+    Used,
 };
 
 impl Default for Configuration {
@@ -49,6 +50,8 @@ impl Default for Configuration {
                     target: Target::Even,
                 },
             ]),
+            credit_vector: Vec::new(),
+            spent_vector: Vec::new(),
             schedule: Schedule(Vec::new()),
             override_vector: Vec::new(),
             baseline: Baseline(Percent(100)),
@@ -87,6 +90,33 @@ impl Validating for Target {
         }
     }
 }
+impl Validating for Credit {
+    /// API credits are positive, ordered grants. The optional lead is
+    /// normalized on admission; when present it is a nonnegative duration.
+    fn validate(&self) -> Result<(), String> {
+        if !matches!(&self.provider, Provider::ClaudeApi | Provider::OpenAiApi) {
+            return Err("a credit belongs to an API provider".into());
+        }
+        if self.granted.0 <= 0 {
+            return Err("a credit grant must be positive cents".into());
+        }
+        if self.starts.0.0 >= self.expires.0.0 {
+            return Err("a credit starts before it expires".into());
+        }
+        jiff::Timestamp::from_second(self.starts.0.0)
+            .map_err(|error| format!("credit start is not a timestamp: {error}"))?;
+        jiff::Timestamp::from_second(self.expires.0.0)
+            .map_err(|error| format!("credit expiry is not a timestamp: {error}"))?;
+        if self
+            .lead_time_option
+            .as_ref()
+            .is_some_and(|lead| lead.0 < 0)
+        {
+            return Err("a credit expiry lead time must not be negative".into());
+        }
+        Ok(())
+    }
+}
 impl Validating for signal_energy_nexus::TimeZone {
     /// A configured zone is a name the zone database knows.
     fn validate(&self) -> Result<(), String> {
@@ -116,6 +146,36 @@ impl Validating for Configuration {
         for target in &self.targets.0 {
             target.target.validate()?;
         }
+        let mut credit_providers = Vec::new();
+        for credit in &self.credit_vector {
+            credit.validate()?;
+            if credit_providers.contains(&credit.provider) {
+                return Err("one credit grant is configured per API provider".into());
+            }
+            credit_providers.push(credit.provider.clone());
+        }
+        let mut spent_providers = Vec::new();
+        for spent in &self.spent_vector {
+            let Some(credit) = self
+                .credit_vector
+                .iter()
+                .find(|credit| credit.provider == spent.provider)
+            else {
+                return Err("spent requires a configured credit grant".into());
+            };
+            if spent_providers.contains(&spent.provider) {
+                return Err("one spend observation is configured per API provider".into());
+            }
+            spent_providers.push(spent.provider.clone());
+            if spent.cents.0 < 0 {
+                return Err("spent cents must not be negative".into());
+            }
+            if spent.at.0.0 < credit.starts.0.0 || spent.at.0.0 >= credit.expires.0.0 {
+                return Err("a spend observation falls within its credit period".into());
+            }
+            jiff::Timestamp::from_second(spent.at.0.0)
+                .map_err(|error| format!("spend observation is not a timestamp: {error}"))?;
+        }
         for span in &self.schedule.0 {
             span.check()?;
         }
@@ -144,16 +204,200 @@ impl OwnerZone for Configuration {
     }
 }
 
-/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 4 holds a
+/// The owner-configured credit period and its event boundaries.
+pub trait CreditTiming {
+    /// The lead configured with this grant, or the documented seven-day
+    /// default for an input that leaves it absent.
+    fn lead_time(&self) -> Minutes;
+    /// The next start, Low lead boundary, or expiry after `now`.
+    fn next_transition(&self, now: Instant) -> Option<Instant>;
+    /// The next monthly period, preserving local time and clamping at month
+    /// end in the owner's zone.
+    fn next_period(&self, zone: &jiff::tz::TimeZone) -> Result<Credit, String>;
+}
+impl CreditTiming for Credit {
+    fn lead_time(&self) -> Minutes {
+        self.lead_time_option.unwrap_or(Minutes(10_080))
+    }
+    fn next_transition(&self, now: Instant) -> Option<Instant> {
+        let low = self
+            .expires
+            .0
+            .0
+            .saturating_sub(self.lead_time().0.saturating_mul(60));
+        [self.starts.0.0, low, self.expires.0.0]
+            .into_iter()
+            .filter(|at| *at > now.0)
+            .min()
+            .map(Instant)
+    }
+    fn next_period(&self, zone: &jiff::tz::TimeZone) -> Result<Credit, String> {
+        use jiff::ToSpan;
+        let start = self.expires.0.0;
+        let timestamp = jiff::Timestamp::from_second(start)
+            .map_err(|error| format!("credit expiry is not a timestamp: {error}"))?;
+        let next = timestamp
+            .to_zoned(zone.clone())
+            .checked_add(1.month())
+            .map_err(|error| format!("credit renewal is outside the calendar: {error}"))?
+            .timestamp()
+            .as_second();
+        if next <= start {
+            return Err("monthly credit renewal must advance its expiry".into());
+        }
+        Ok(Credit {
+            starts: Starts(Instant(start)),
+            expires: Expires(Instant(next)),
+            ..self.clone()
+        })
+    }
+}
+
+/// A grant, its observed spend and the Credit window derived from them.
+pub trait CreditAccounting {
+    fn credit_for(&self, provider: &Provider) -> Option<&Credit>;
+    fn credits(&self) -> Vec<Credit>;
+    fn balance_for(&self, provider: &Provider, now: Instant) -> Result<Balance, BalanceRefused>;
+    fn reading_for(&self, provider: &Provider, now: Instant) -> Result<Reading, BalanceRefused>;
+    fn advance_expired(&mut self, now: Instant) -> Result<Vec<Provider>, String>;
+}
+impl CreditAccounting for Memory {
+    fn credit_for(&self, provider: &Provider) -> Option<&Credit> {
+        self.configuration
+            .credit_vector
+            .iter()
+            .find(|credit| &credit.provider == provider)
+    }
+    fn credits(&self) -> Vec<Credit> {
+        self.configuration.credit_vector.clone()
+    }
+    fn balance_for(&self, provider: &Provider, now: Instant) -> Result<Balance, BalanceRefused> {
+        let Some(credit) = self.credit_for(provider) else {
+            return Err(BalanceRefused::NoCredit(provider.clone()));
+        };
+        let observed = self
+            .configuration
+            .spent_vector
+            .iter()
+            .find(|spent| &spent.provider == provider);
+        let spent = if now.0 < credit.starts.0.0 {
+            0
+        } else {
+            observed
+                .filter(|spent| spent.at.0.0 <= now.0)
+                .map(|spent| spent.cents.0)
+                .ok_or_else(|| BalanceRefused::SpentUnavailable(provider.clone()))?
+        };
+        let live = now.0 < credit.expires.0.0;
+        let left = if live {
+            credit.granted.0.saturating_sub(spent).max(0)
+        } else {
+            0
+        };
+        let target = self
+            .configuration
+            .targets
+            .0
+            .iter()
+            .find(|target| &target.provider == provider)
+            .map(|target| target.target.clone())
+            .unwrap_or(Target::Even);
+        let credit_hours = credit
+            .expires
+            .0
+            .0
+            .saturating_sub(credit.starts.0.0)
+            / 3_600;
+        let (deadline, spend_goal) = match target {
+            Target::SpendBy(target) if target.hours.0 <= credit_hours => {
+                let deadline = credit.expires.0.0.saturating_sub(target.hours.0.saturating_mul(3_600));
+                let goal = i128::from(credit.granted.0) * i128::from(target.percent.0.clamp(0, 100)) / 100;
+                (deadline, (goal - i128::from(spent)).max(0))
+            }
+            Target::SpendBy(_) | Target::Even => (credit.expires.0.0, i128::from(left)),
+        };
+        let seconds_left = deadline.saturating_sub(now.0).max(0);
+        let days_left = seconds_left.saturating_add(86_399) / 86_400;
+        let per_day = if days_left == 0 {
+            0
+        } else {
+            i64::try_from(spend_goal / i128::from(days_left)).unwrap_or(i64::MAX)
+        };
+        Ok(Balance {
+            provider: provider.clone(),
+            granted: credit.granted,
+            spent: Cents(spent),
+            left: Cents(left),
+            expires: credit.expires,
+            per_day: Cents(per_day),
+        })
+    }
+    fn reading_for(&self, provider: &Provider, now: Instant) -> Result<Reading, BalanceRefused> {
+        let balance = self.balance_for(provider, now)?;
+        let credit = self
+            .credit_for(provider)
+            .ok_or_else(|| BalanceRefused::NoCredit(provider.clone()))?;
+        let left_percent = (i128::from(balance.left.0) * 100 / i128::from(balance.granted.0)) as i64;
+        let used = 100 - left_percent.clamp(0, 100);
+        let seconds = credit.expires.0.0.saturating_sub(credit.starts.0.0).max(0);
+        let minutes = seconds / 60;
+        Ok(Reading {
+            provider: provider.clone(),
+            allowed: signal_energy_nexus::Allowed(
+                balance.left.0 > 0
+                    && credit.starts.0.0 <= now.0
+                    && now.0 < credit.expires.0.0,
+            ),
+            window_vector: vec![signal_energy_nexus::Window {
+                name: Name::Credit,
+                used: Used(Percent(used)),
+                resets: signal_energy_nexus::Resets(credit.expires.0),
+                duration: signal_energy_nexus::Duration(Minutes(minutes)),
+            }],
+            reset_vector: Vec::new(),
+            at: signal_energy_nexus::At(now),
+        })
+    }
+    fn advance_expired(&mut self, now: Instant) -> Result<Vec<Provider>, String> {
+        let zone = self.configuration.owner_zone();
+        let mut changed = Vec::new();
+        for index in 0..self.configuration.credit_vector.len() {
+            let mut credit = self.configuration.credit_vector[index].clone();
+            let mut renewed = false;
+            while credit.renewal == Renewal::Monthly && now.0 >= credit.expires.0.0 {
+                let boundary = credit.expires.0.0;
+                credit = credit.next_period(&zone)?;
+                self.configuration.spent_vector
+                    .retain(|spent| spent.provider != credit.provider);
+                self.configuration.spent_vector.push(Spent {
+                    provider: credit.provider.clone(),
+                    cents: Cents(0),
+                    at: signal_energy_nexus::At(Instant(boundary)),
+                });
+                renewed = true;
+            }
+            if renewed {
+                self.configuration.credit_vector[index] = credit.clone();
+                self.latest_vector
+                    .retain(|latest| latest.provider != credit.provider);
+                changed.push(credit.provider);
+            }
+        }
+        Ok(changed)
+    }
+}
+
+/// The daemon's Memory, `energy.rkyv`, under its envelope. Version 5 holds a
 /// `SpendBy` target as the hours before the window resets, recurring with
-/// every reset; version 3 held it as an instant. Versions 3, 2 and 1 and the
-/// archive written before the envelope are upgraded on open.
+/// every reset, plus configured credit periods and spend observations;
+/// version 4 held all prior settings without credits. Versions 4, 3, 2 and 1
+/// and the archive written before the envelope are upgraded on open.
 impl Persisted for Memory {
     const ENVELOPE: Envelope = Envelope {
         magic: *b"ENXMEMRY",
-        version: 4,
+        version: 5,
     };
-    const EARLIER_VERSIONS: &'static [u32] = &[1, 2, 3];
+    const EARLIER_VERSIONS: &'static [u32] = &[1, 2, 3, 4];
     type Uncarried = NotCarried;
     fn from_archive(archive: &[u8]) -> Result<Self, String> {
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(archive).map_err(|error| error.to_string())
@@ -180,6 +424,11 @@ impl Persisted for Memory {
                     .map(Upgrade::from)
                     .map_err(|error| error.to_string())
             }
+            Earlier::Version(4) => {
+                rkyv::from_bytes::<version4::Memory, rkyv::rancor::Error>(archive)
+                    .map(|old| Upgrade::from(old))
+                    .map_err(|error| error.to_string())
+            }
             Earlier::Version(version) => Err(format!("no layout of format version {version}")),
         }
     }
@@ -188,6 +437,86 @@ impl Persisted for Memory {
     }
     fn validate(&self) -> Result<(), String> {
         self.configuration.validate()
+    }
+}
+
+/// The version 4 layout is kept for the first Credit upgrade. Its imported
+/// Energy records have unchanged fields; adding provider and window variants
+/// only appends discriminants, so earlier values retain their archive shape.
+pub mod version4 {
+    use signal_energy_nexus::{
+        Baseline, Level, Minutes, Override, Percent, Provider, ProviderTarget, Reading, Reminder,
+        Span, Threshold, TimeZone,
+    };
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Memory {
+        pub latest_vector: Vec<Latest>,
+        pub history: History,
+        pub configuration: Configuration,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Latest {
+        pub provider: Provider,
+        pub reading: Reading,
+        pub level: Level,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct History(pub Vec<Reading>);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct RedeemExpiring(pub Minutes);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct RedeemUsedAtLeast(pub Percent);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Targets(pub Vec<ProviderTarget>);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Schedule(pub Vec<Span>);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq)]
+    pub struct Configuration {
+        pub threshold_vector: Vec<Threshold>,
+        pub reminder_vector: Vec<Reminder>,
+        pub redeem_expiring: RedeemExpiring,
+        pub redeem_used_at_least: RedeemUsedAtLeast,
+        pub targets: Targets,
+        pub schedule: Schedule,
+        pub override_vector: Vec<Override>,
+        pub baseline: Baseline,
+        pub time_zone_option: Option<TimeZone>,
+    }
+}
+impl From<version4::Memory> for Upgrade<Memory> {
+    fn from(old: version4::Memory) -> Self {
+        let configuration = old.configuration;
+        Self {
+            memory: Memory {
+                latest_vector: old
+                    .latest_vector
+                    .into_iter()
+                    .map(|latest| Latest {
+                        provider: latest.provider,
+                        reading: latest.reading,
+                        level: latest.level,
+                    })
+                    .collect(),
+                history: History(old.history.0),
+                configuration: Configuration {
+                    threshold_vector: configuration.threshold_vector,
+                    reminder_vector: configuration.reminder_vector,
+                    redeem_expiring: RedeemExpiring(configuration.redeem_expiring.0),
+                    redeem_used_at_least: RedeemUsedAtLeast(
+                        configuration.redeem_used_at_least.0,
+                    ),
+                    targets: Targets(configuration.targets.0),
+                    credit_vector: Vec::new(),
+                    spent_vector: Vec::new(),
+                    schedule: Schedule(configuration.schedule.0),
+                    override_vector: configuration.override_vector,
+                    baseline: configuration.baseline,
+                    time_zone_option: configuration.time_zone_option,
+                },
+            },
+            uncarried: Vec::new(),
+        }
     }
 }
 
@@ -585,6 +914,8 @@ pub mod version3 {
                         configuration.redeem_used_at_least,
                     ),
                     targets: super::Targets(targets),
+                    credit_vector: Vec::new(),
+                    spent_vector: Vec::new(),
                     schedule: super::Schedule(configuration.schedule),
                     override_vector: configuration.overrides,
                     baseline: configuration.baseline,
@@ -690,10 +1021,10 @@ impl Pacing for Reading {
         self.window_vector
             .iter()
             .map(|window| {
-                // A provider's target paces both week windows, Week and
-                // FableWeek; the Session takes none and is paced evenly.
+                // A provider's target paces Week, FableWeek and its Credit
+                // period; the Session takes none and is paced evenly.
                 let target = match window.name {
-                    Name::Week | Name::FableWeek => configuration
+                    Name::Week | Name::FableWeek | Name::Credit => configuration
                         .targets
                         .0
                         .iter()
@@ -703,7 +1034,16 @@ impl Pacing for Reading {
                     Name::Session => Target::Even,
                 };
                 let used = window.used.0.0.clamp(0, 100);
-                let start = window.resets.0.0 - window.duration.0.0 * 60;
+                let start = if window.name == Name::Credit {
+                    configuration
+                        .credit_vector
+                        .iter()
+                        .find(|credit| credit.provider == self.provider)
+                        .map(|credit| credit.starts.0.0)
+                        .unwrap_or(window.resets.0.0 - window.duration.0.0 * 60)
+                } else {
+                    window.resets.0.0 - window.duration.0.0 * 60
+                };
                 // The instant the target ends at and how much of the window
                 // it spends by then: the whole window by its reset, or a
                 // percent of it by so many hours before this window's reset,
@@ -817,6 +1157,26 @@ impl Levelling for Reading {
         if !self.allowed.0 {
             return Level::Out;
         }
+        if let Some(credit) = configuration
+            .credit_vector
+            .iter()
+            .find(|credit| credit.provider == self.provider)
+            .filter(|_| {
+                self.window_vector
+                    .iter()
+                    .any(|window| window.name == Name::Credit)
+            })
+        {
+            let within_lead = credit
+                .expires
+                .0
+                .0
+                .saturating_sub(self.at.0.0)
+                <= credit.lead_time().0.saturating_mul(60);
+            if within_lead && self.at.0.0 < credit.expires.0.0 {
+                return Level::Low;
+            }
+        }
         let left = 100
             - self
                 .window_vector
@@ -922,11 +1282,36 @@ impl Configuring for Memory {
             }
             Set::Baseline(baseline) => baseline.check().map_err(rule)?,
             Set::TimeZone(zone) => zone.validate().map_err(rule)?,
+            Set::Credit(credit) => credit.validate().map_err(rule)?,
+            Set::Spent(spent) => {
+                let credit = self
+                    .configuration
+                    .credit_vector
+                    .iter()
+                    .find(|credit| credit.provider == spent.provider)
+                    .ok_or_else(|| rule("spent requires a configured credit grant"))?;
+                if spent.cents.0 < 0 {
+                    return Err(rule("spent cents must not be negative"));
+                }
+                if spent.at.0.0 > now.0 {
+                    return Err(rule("a spend observation cannot be in the future"));
+                }
+                if spent.at.0.0 < credit.starts.0.0 || spent.at.0.0 >= credit.expires.0.0 {
+                    return Err(rule("a spend observation falls within its credit period"));
+                }
+            }
             _ => {}
         }
         let set = match set {
             Set::Span(span) => Set::Span(span.normalized()),
             Set::RemoveSpan(span) => Set::RemoveSpan(span.normalized()),
+            Set::Credit(mut credit) => {
+                if credit.lead_time_option.is_none() {
+                    let lead_time = credit.lead_time();
+                    credit.lead_time_option = Some(lead_time);
+                }
+                Set::Credit(credit)
+            }
             other => other,
         };
         let schedule_changes = matches!(
@@ -984,6 +1369,35 @@ impl Configuring for Memory {
             }
             Set::Baseline(value) => self.configuration.baseline = value,
             Set::TimeZone(value) => self.configuration.time_zone_option = Some(value),
+            Set::Credit(value) => {
+                let same_period = self
+                    .configuration
+                    .credit_vector
+                    .iter()
+                    .find(|known| known.provider == value.provider)
+                    .is_some_and(|known| {
+                        known.starts == value.starts && known.expires == value.expires
+                    });
+                self.configuration
+                    .credit_vector
+                    .retain(|known| known.provider != value.provider);
+                self.configuration.credit_vector.push(value.clone());
+                if !same_period {
+                    self.configuration
+                        .spent_vector
+                        .retain(|known| known.provider != value.provider);
+                }
+                self.latest_vector
+                    .retain(|latest| latest.provider != value.provider);
+            }
+            Set::Spent(value) => {
+                self.configuration
+                    .spent_vector
+                    .retain(|known| known.provider != value.provider);
+                self.configuration.spent_vector.push(value.clone());
+                self.latest_vector
+                    .retain(|latest| latest.provider != value.provider);
+            }
             Set::Program(_) | Set::Credentials(_) => {
                 return Err(rule("translator configuration belongs to the translator"))
             }

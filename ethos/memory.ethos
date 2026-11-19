@@ -1,9 +1,11 @@
 Memory
-[ signal_energy_nexus:[ Provider Reading Level Threshold Reminder Minutes Percent ProviderTarget Span Override Baseline TimeZone ] ] ; imports the Energy vocabulary
-[ Memory.{ Vector<Latest> History Configuration }         ; the stored root of energy.rkyv, format version 4
+[ signal_energy_nexus:[ Provider Reading Level Threshold Reminder Minutes Percent ProviderTarget Span Override Baseline TimeZone Credit Spent ] ] ; imports the Energy vocabulary
+[ Memory.{ Vector<Latest> History Configuration }         ; the stored root of energy.rkyv, format version 5
   Latest.{ Provider Reading Level }                        ; the latest observation and level for one provider
   History.Vector<Reading>                                  ; every reading, in the order taken
   Configuration.{ Vector<Threshold> Vector<Reminder> RedeemExpiring.Minutes RedeemUsedAtLeast.Percent Targets.Vector<ProviderTarget> ; the Nexus policy state, a target for each provider's Week window
+                  Vector<Credit>                                  ; the configured credit grants, with their lead times
+                  Vector<Spent>                                    ; what was spent in each configured credit period, at its observation time
                   Schedule.Vector<Span>                    ; the usefulness of the hours of the week, span by span
                   Vector<Override>                         ; stretches of time whose usefulness is set over the schedule
                   Baseline                                 ; the usefulness of an hour no span names

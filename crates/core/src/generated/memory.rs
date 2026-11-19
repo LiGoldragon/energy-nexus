@@ -49,6 +49,8 @@ pub struct Configuration {
     pub redeem_expiring: RedeemExpiring,
     pub redeem_used_at_least: RedeemUsedAtLeast,
     pub targets: Targets,
+    pub credit_vector: std::vec::Vec<signal_energy_nexus::Credit>,
+    pub spent_vector: std::vec::Vec<signal_energy_nexus::Spent>,
     pub schedule: Schedule,
     pub override_vector: std::vec::Vec<signal_energy_nexus::Override>,
     pub baseline: signal_energy_nexus::Baseline,
